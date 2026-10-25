@@ -101,3 +101,55 @@
 @media(max-width:750px){.ruler-preview-area>.print-canvas{height:min(50vh,460px)!important;min-height:130px;}}
 
 .reset-effect-button{margin-top:10px}
+
+/* V8.4 – contextual toolbar and compact right tool rail; existing dark theme intact. */
+.workbench{grid-template-columns:minmax(205px,250px) minmax(260px,1fr) auto!important}
+.right-workspace{display:flex;align-self:stretch;min-width:0;width:65px;max-width:min(385px,44vw);overflow:hidden;border-left:1px solid #343434;background:#191919;transition:width .18s ease}
+.right-workspace-open{width:375px}
+.right-workspace>.properties{flex:1 1 0;width:0;min-width:0;max-width:none;overflow-y:auto;border-left:none;visibility:hidden}
+.right-workspace-open>.properties{width:310px;visibility:visible}
+.design-tool-rail{flex:0 0 64px;width:64px;padding:12px 4px 10px;background:#151515;border-left:1px solid #333;display:flex;flex-direction:column;align-items:center;gap:6px;overflow-y:auto}
+.design-rail-button{width:54px;min-height:55px;border:1px solid transparent;border-radius:9px;color:#c5c5c5;background:transparent;display:flex;align-items:center;justify-content:center;gap:4px;flex-direction:column;cursor:pointer}
+.design-rail-button>span{font-size:20px;line-height:23px;font-weight:600}
+.design-rail-button>small{font-size:9px;line-height:12px}
+.design-rail-button:hover{border-color:#444;background:#292929;color:#fff}
+.design-rail-button.active{background:#343434;border-color:#626262;color:#fff}
+.design-rail-close{margin-top:auto;width:36px;height:32px;cursor:pointer;background:#252525;color:#ddd;border:1px solid #444;border-radius:7px;font-size:20px}
+.selection-toolbar{display:flex;align-items:center;gap:8px;min-width:0;overflow-x:auto;scrollbar-width:thin;flex:0 0 auto;border-bottom:1px solid #393939;background:#1e1e1e;padding:9px 12px;color:#e7e7e7;white-space:nowrap}
+.selection-chip{font-weight:700;font-size:11px;padding:7px 8px;border:1px solid #494949;background:#303030;border-radius:6px;flex:0 0 auto}
+.selection-field{display:flex;align-items:center;gap:6px;font-size:10px;color:#bbb;flex:0 0 auto}
+.selection-field select,.selection-field input{min-height:32px;box-sizing:border-box;background:#121212;border:1px solid #494949;border-radius:6px;padding:5px 6px;color:#fafafa;font-size:11px}
+.selection-font select{max-width:158px;width:135px;text-overflow:ellipsis}
+.selection-size input{width:62px;text-align:center}
+.selection-dimension input{width:60px;text-align:center}
+.selection-color{display:flex;align-items:center;border-radius:50%;overflow:hidden;width:31px;height:31px;border:1px solid #5c5c5c;flex:0 0 31px;cursor:pointer}
+.selection-color input{border:none;padding:0;width:47px;height:47px;transform:translate(-8px,-8px);cursor:pointer}
+.selection-action{min-height:32px;padding:5px 9px;color:#eee;background:#303030;border:1px solid #505050;border-radius:7px;cursor:pointer;flex:0 0 auto;font-size:11px}
+.selection-action:hover{background:#454545;border-color:#777}
+.selection-autoheight{border:1px solid #454545;padding:8px;border-radius:6px;color:#a7a7a7}
+.selection-location{font-size:10px;color:#999;flex:0 0 auto}
+.properties #js-fonts-section,.properties #js-text-effects-section,.properties #js-sponsor-section{scroll-margin-top:12px}
+@media (min-width:1200px){.workbench{grid-template-columns:285px minmax(260px,1fr) auto!important}}
+@media (max-width:950px){.right-workspace-open{width:min(345px,52vw)}.right-workspace{max-width:52vw}.design-tool-rail{flex-basis:58px;width:58px}.design-rail-button{width:49px}.selection-toolbar{padding:7px}}
+
+/* V8.5: contextual sponsor selection and non-printing drag guides */
+.smart-guide-lines{pointer-events:none}
+#js-sponsor-section,#js-sponsor-section textarea{scroll-margin-top:40px}
+
+/* V8.6 preview-only zoom and layout */
+.preview-zoom-controls{display:inline-flex;align-items:center;gap:5px;font-size:11px;white-space:nowrap}
+.preview-zoom-controls button{min-width:24px;min-height:26px;border-radius:5px;border:1px solid #555;background:#2b2b2b;color:#eee;cursor:pointer;padding:3px 5px}
+.preview-zoom-controls span{min-width:38px;text-align:center;font-variant-numeric:tabular-nums}
+.ruler-stage{overflow:auto!important}
+.ruler-preview-area{transition:transform .1s ease}
+
+/* V8.8: when zoomed, the entire page stays reachable by scrolling. */
+.ruler-stage{
+  justify-content:safe center!important;
+  align-items:safe center!important;
+  overscroll-behavior:contain;
+}
+.ruler-preview-area{
+  max-width:none!important;
+  transition:none!important;
+}

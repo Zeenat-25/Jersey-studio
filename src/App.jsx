@@ -93,11 +93,18 @@ const initialSettings = {
   bottomMarkHeight: 0.5,
   bottomMarkFill: '#000000',
   bottomMarkTextFill: '#ffffff',
+  markPreset: 'standard', // Standard preserves the existing print marks.
+  markLabelPosition: 'bottom-left',
+  markLabelColor: '#ffffff',
+  markLabelBackground: '#000000',
+  markLabelEnabled: true,
+  smartGuidesEnabled: true,
+  smartGuideColor: '#00f0ff',
   sleeveMarkEnabled: true,
   sleeveMarkText: 'FULL SLEEVE',
   sleeveMarkPosition: 'bottom-left',
   sleeveMarkFill: '#000000',
-  sleeveMarkHeight: 0.2,
+  sleeveMarkHeight: 0.5,
   backPaperEnabled: true,
   frontNumber: false,
   frontNumberX: 50,
@@ -132,31 +139,62 @@ const columns = {
   quantity: ['quantity', 'qty', 'count', 'pieces', 'pcs'],
   sleeve: ['sleeve', 'sleeves', 'sleevetype'],
 };
+// Column-aware roster parser. Header order may vary; headerless rows are classified
+// by sleeve/size/name/number tokens, and ambiguous cells remain in the review grid.
 function parseRows(rows, defaultSize = '38') {
-  const filtered = rows.map(r => (Array.isArray(r) ? r : [])).filter(r => r.some(c => cleanCell(c)));
+  const filtered = rows.map(row => Array.isArray(row) ? row.map(cleanCell) : []).filter(row => row.some(Boolean));
   if (!filtered.length) return [];
-  const first = filtered[0].map(normalizeHeader);
-  const matched = Object.fromEntries(Object.entries(columns).map(([key, aliases]) => [key, first.findIndex(h => aliases.includes(h))]));
-  const headerExists = Object.values(matched).filter(x => x >= 0).length >= 2;
-  const source = headerExists ? filtered.slice(1) : filtered;
-  return source.map((cells, index) => {
-    const at = (key, fallbackIndex) => cleanCell(cells[headerExists ? matched[key] : fallbackIndex]);
-    const name = at('name', 0);
-    const number = at('number', 1);
-    const rawSize = at('size', 2) || defaultSize;
-    const size = canonicalSize(rawSize) || rawSize;
-    const q = parseInt(at('quantity', 3), 10);
-    const sleeveText = at('sleeve', 4).toLowerCase();
-    return { id: Date.now() + index + Math.round(Math.random() * 100000), name: upper(name), number, size, quantity: Number.isFinite(q) && q > 0 ? q : 1, sleeve: sleeveText.includes('full') ? 'Full' : 'Half' };
-  }).filter(r => r.name || r.number);
+  const headers = filtered[0].map(normalizeHeader);
+  const positions = Object.fromEntries(Object.entries(columns).map(([kind, aliases]) =>
+    [kind, headers.findIndex(value => aliases.includes(value))]));
+  const hasHeader = Object.values(positions).filter(index => index >= 0).length >= 2;
+  const records = hasHeader ? filtered.slice(1) : filtered;
+  const sizeKey = token => canonicalSize(token) || '';
+  const sleeveType = token => /^(full|half)(\s*sleeves?)?$/i.test(token) ? (/^full/i.test(token) ? 'Full' : 'Half') : null;
+  const isNumber = token => /^\d{1,4}$/.test(token);
+  return records.map((cells, index) => {
+    let name = '', number = '', size = '', quantity = 1, sleeve = 'Half';
+    if (hasHeader) {
+      const get = key => positions[key] >= 0 ? cleanCell(cells[positions[key]]) : '';
+      name = get('name'); number = get('number'); size = get('size');
+      quantity = Number(get('quantity')) || 1;
+      sleeve = sleeveType(get('sleeve')) || 'Half';
+    } else {
+      const tokens = cells.flatMap(cell => cell.split(/[;,\t]+/).map(t => t.trim()).filter(Boolean));
+      const used = new Set();
+      const take = (index) => { used.add(index); return tokens[index]; };
+      const sleeveIndex = tokens.findIndex(token => sleeveType(token));
+      if (sleeveIndex >= 0) sleeve = sleeveType(take(sleeveIndex));
+      // Explicit size aliases are unambiguous. Numeric sizes are identified
+      // preferentially near a name, leaving leading-zero jersey numbers intact.
+      let sizeIndex = tokens.findIndex((token, i) => !used.has(i) && sizeKey(token) && !/^\d+$/.test(token));
+      if (sizeIndex < 0) sizeIndex = tokens.findIndex((token,i) => !used.has(i) && /^(20|22|24|26|28|30|32|34|36|38|40|42|44|46|48|50)$/.test(token));
+      if (sizeIndex >= 0) size = sizeKey(take(sizeIndex));
+      let nameIndex = tokens.findIndex((token,i) => !used.has(i) && /[\p{L}]/u.test(token) && !sizeKey(token) && !sleeveType(token));
+      if (nameIndex >= 0) name = take(nameIndex);
+      // Expand multi-word names while preserving the numeric columns.
+      for (let i=0;i<tokens.length;i++) if (!used.has(i) && /[\p{L}]/u.test(tokens[i]) && !sizeKey(tokens[i]) && !sleeveType(tokens[i])) {
+        name = [name, take(i)].filter(Boolean).join(' ');
+      }
+      const remaining = tokens.map((token,i) => ({token,i})).filter(item => !used.has(item.i) && isNumber(item.token));
+      // One number is the jersey number. A second trailing number can be quantity.
+      if (remaining.length) number = take(remaining[0].i);
+      if (remaining.length >= 2) quantity = Number(take(remaining[1].i)) || 1;
+      // When size is omitted, use the selected default without removing a player.
+    }
+    return { id: Date.now() + index * 1009 + Math.round(Math.random() * 100000),
+      name: upper(name), number, size: sizeKey(size) || size || defaultSize,
+      quantity: Number.isFinite(Number(quantity)) && Number(quantity) > 0 ? Math.floor(Number(quantity)) : 1,
+      sleeve };
+  }).filter(row => row.name || row.number);
 }
 function parseTyped(text, defaultSize = '38') {
-  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  const rows = lines.map(line => {
-    if (line.includes('\t')) return line.split('\t');
-    if (line.includes(',') || line.includes(';')) return line.split(/[;,]/);
-    const parts = line.match(/^(.*?)\s+(\d{1,4})\s+(\d{2}|[A-Za-z0-9]{1,6})\s*(\d+)?\s*(full|half)?$/i);
-    return parts ? [parts[1], parts[2], parts[3], parts[4] || '1', parts[5] || 'Half'] : [line];
+  const rows = String(text || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(line => {
+    if (/[\t,;]/.test(line)) return line.split(/[\t,;]/).map(item => item.trim());
+    // A whitespace-delimited header is still a header regardless of column order.
+    const parts = line.split(/\s+/);
+    if (parts.filter(part => Object.values(columns).some(aliases => aliases.includes(normalizeHeader(part)))).length >= 2) return parts;
+    return line.match(/(?:"[^"]*"|'[^']*'|\S+)/g)?.map(part => part.replace(/^["']|["']$/g,'')) || [];
   });
   return parseRows(rows, defaultSize);
 }
@@ -242,6 +280,7 @@ function App() {
       editSize: canonicalSize(saved.editSize || '38', saved.sizes) || '38',
       sizes: chart === 'Standard' ? structuredClone(DEFAULT_SIZES) : migrateSizePresets(saved.sizes),
       sponsors: migratedSponsors,
+      sleeveMarkHeight: Number(saved.sleeveMarkHeight ?? .5) === .2 ? .5 : Number(saved.sleeveMarkHeight ?? .5),
     };
   });
   const [chartNames, setChartNames] = useState(() => {
@@ -291,14 +330,46 @@ function App() {
   const [side, setSide] = useState('back');
   const [grouped, setGrouped] = useState(false);
   const [activeControl, setActiveControl] = useState('name');
+  const [textWasSelected, setTextWasSelected] = useState(false);
   const [notice, setNotice] = useState('');
   const [exportDpi, setExportDpi] = useState(300);
   const [exportBusy, setExportBusy] = useState(false);
   const [exportProgress, setExportProgress] = useState(null);
   const [settingsTab, setSettingsTab] = useState('text');
+  const [rightToolsOpen, setRightToolsOpen] = useState(false);
+  const [rightTool, setRightTool] = useState('text');
+  const [guideLines, setGuideLines] = useState({x:null,y:null});
+  const [previewZoom, setPreviewZoom] = useState(100);
+  const stageRef = useRef(null);
+  const panRef = useRef(null);
+  const startPan = event => {
+    if (event.button !== 1 || !stageRef.current) return;
+    event.preventDefault();
+    const stage = stageRef.current;
+    panRef.current = {x:event.clientX,y:event.clientY,left:stage.scrollLeft,top:stage.scrollTop};
+    stage.style.cursor = 'grabbing';
+    const move = e => {
+      if (!panRef.current) return;
+      stage.scrollLeft = panRef.current.left + panRef.current.x - e.clientX;
+      stage.scrollTop = panRef.current.top + panRef.current.y - e.clientY;
+    };
+    const stop = () => {
+      panRef.current = null;
+      stage.style.cursor = '';
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('blur', stop);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('blur', stop);
+  };
+  const selectedElementRef = useRef(null);
+
   const [exportReviewOpen,setExportReviewOpen] = useState(false);
   const svgRef = useRef(null);
   const dragRef = useRef(null);
+  const sponsorFocusRef = useRef(null);
   const fontFiles = useRef([]);
   useEffect(() => { localStorage.setItem('js-settings', JSON.stringify(settings)); }, [settings]);
   useEffect(() => { localStorage.setItem('js-players', JSON.stringify(players)); }, [players]);
@@ -363,6 +434,20 @@ function App() {
   const addPlayer = () => { setPlayers(ps => [{ id: Date.now(), name: '', number: '', size: '38', quantity: 1, sleeve: 'Half' }, ...ps]); setPlayerIndex(0); };
   const removePlayer = id => { setPlayers(ps => ps.filter(p => p.id !== id)); setPlayerIndex(0); };
   const updateSponsor = (id, patch) => setSettings(s => ({ ...s, sponsors: (s.sponsors || []).map(line => line.id === id ? { ...line, ...patch } : line) }));
+  function openSponsorEditor(id, focusImmediately = false) {
+    setActiveControl(`sponsor:${id}`);
+    setTextWasSelected(true);
+    setRightTool('text');
+    setSettingsTab('text');
+    setRightToolsOpen(true);
+    sponsorFocusRef.current = focusImmediately ? null : id;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const target = document.getElementById(`js-sponsor-text-${id}`);
+      target?.scrollIntoView({block:'center',behavior:'smooth'});
+      if (focusImmediately) { target?.focus({preventScroll:true}); target?.select(); }
+    }));
+  }
+
   const addSponsor = () => {
     const line = sponsorTemplate(Date.now(), settings.nameFont || 'Arial');
     line.label = `Sponsor ${String((settings.sponsors || []).length + 1)}`;
@@ -475,7 +560,6 @@ function App() {
   function resetNameSettings() {
     setSettings(s => ({
       ...s,
-      nameFont: initialSettings.nameFont,
       namePoints: initialSettings.namePoints,
       nameWidth: initialSettings.nameWidth,
       nameFill: initialSettings.nameFill,
@@ -501,7 +585,6 @@ function App() {
   function resetNumberSettings() {
     setSettings(s => ({
       ...s,
-      numberFont: initialSettings.numberFont,
       numberPoints: initialSettings.numberPoints,
       numberWidth: initialSettings.numberWidth,
       numberFill: initialSettings.numberFill,
@@ -562,6 +645,62 @@ function App() {
         : { y: Math.max(0, Math.min(100, (activeSponsor?.y ?? 12) + value)) });
     }
   }
+  // Canvas-only shortcuts: never hijack typing in inputs, selects or textareas.
+  useEffect(() => {
+    const handler = event => {
+      if (!event.ctrlKey || event.altKey || event.metaKey || !textWasSelected || !['back', 'front'].includes(side)) return;
+      const el = event.target;
+      if (el?.closest?.('input,textarea,select,[contenteditable="true"]')) return;
+      const code = event.key.toLowerCase();
+      if (!['c','e','p'].includes(code)) return;
+      event.preventDefault();
+      const centeredX = code === 'c' || code === 'p';
+      const centeredY = code === 'e' || code === 'p';
+      const clamp = n => Math.max(0, Math.min(100, Number(n) || 0));
+      setSettings(previous => {
+        if (activeControl.startsWith('sponsor:')) {
+          const id = Number(activeControl.split(':')[1]);
+          return { ...previous, sponsors: (previous.sponsors || []).map(s => s.id === id ? {
+            ...s, x: centeredX ? 50 : clamp(s.x ?? 50), y: centeredY ? 50 : clamp(s.y ?? 12)
+          } : s) };
+        }
+        if (!['name','number','frontNumber'].includes(activeControl)) return previous;
+        return { ...previous,
+          [`${activeControl}X`]: centeredX ? 50 : previous[`${activeControl}X`],
+          [`${activeControl}Y`]: centeredY ? 50 : previous[`${activeControl}Y`],
+        };
+      });
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [textWasSelected, activeControl, side]);
+
+  // Native non-passive wheel listener suppresses browser Ctrl+wheel zoom over the editor.
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const wheel = event => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      const bounds = stage.getBoundingClientRect();
+      const pointerX = event.clientX - bounds.left;
+      const pointerY = event.clientY - bounds.top;
+      setPreviewZoom(old => {
+        const next = Math.max(50, Math.min(300, Math.round(old - Math.sign(event.deltaY) * 10)));
+        if (next !== old) {
+          const ratio = next / old;
+          requestAnimationFrame(() => {
+            stage.scrollLeft = (stage.scrollLeft + pointerX) * ratio - pointerX;
+            stage.scrollTop = (stage.scrollTop + pointerY) * ratio - pointerY;
+          });
+        }
+        return next;
+      });
+    };
+    stage.addEventListener('wheel', wheel, { passive: false });
+    return () => stage.removeEventListener('wheel', wheel);
+  }, []);
+
   function startDrag(key, e) {
     if (!svgRef.current) return;
     const svg = svgRef.current;
@@ -588,23 +727,47 @@ function App() {
     if (!d) return;
     const dx = (e.clientX - d.startX) / Math.max(d.width, 1) * 100;
     const dy = (e.clientY - d.startY) / Math.max(d.height, 1) * 100;
+    // Shift + drag locks the selected text onto its original horizontal or vertical line.
+    const lockX = e.shiftKey && Math.abs(e.clientX-d.startX) < Math.abs(e.clientY-d.startY);
+    const lockY = e.shiftKey && !lockX;
+    const ownSponsorId = String(d.key).startsWith('sponsor:') ? Number(String(d.key).split(':')[1]) : null;
+    const otherSponsors = (settings.sponsors || []).filter(line => line.id !== ownSponsorId);
+    const xAnchors = [50, 0, 100,
+      ...(d.key === 'name' ? [] : [Number(settings.nameX)]),
+      ...(d.key === 'number' ? [] : [Number(settings.numberX)]),
+      ...otherSponsors.map(line => Number(line.x ?? 50))];
+    const yAnchors = [50, 0, 100,
+      ...(d.key === 'name' ? [] : [Number(settings.nameY)]),
+      ...(d.key === 'number' ? [] : [Number(settings.numberY)]),
+      ...otherSponsors.map(line => Number(line.y ?? 12))];
+    function snap(value, anchors, axis) {
+      if (!settings.smartGuidesEnabled) return value;
+      const source = anchors.filter(x => Number.isFinite(x));
+      const hit = source.find(x => Math.abs(x - value) <= 1.1);
+      return hit == null ? value : hit;
+    }
+    const clamp = value => Math.max(0, Math.min(100, value));
+    const snapX = value => clamp(snap(value, xAnchors, 'x'));
+    const snapY = value => clamp(snap(value, yAnchors, 'y'));
+    const track = (x, y) => setGuideLines(settings.smartGuidesEnabled ? {x: xAnchors.some(p => Math.abs(p-x)<0.01) ? x : null,
+      y:yAnchors.some(p => Math.abs(p-y)<0.01) ? y : null} : {x:null,y:null});
     if (grouped && ['name', 'number'].includes(d.key)) {
-      setSettings(old => ({
-        ...old,
-        nameX: Math.max(0, Math.min(100, d.initial.nameX + dx)),
-        nameY: Math.max(0, Math.min(100, d.initial.nameY + dy)),
-        numberX: Math.max(0, Math.min(100, d.initial.numberX + dx)),
-        numberY: Math.max(0, Math.min(100, d.initial.numberY + dy)),
+      const x = snapX(d.initial[`${d.key}X`] + (lockX ? 0 : dx));
+      const y = snapY(d.initial[`${d.key}Y`] + (lockY ? 0 : dy));
+      const ddx = x - d.initial[`${d.key}X`], ddy = y - d.initial[`${d.key}Y`];
+      track(x,y);
+      setSettings(old => ({ ...old,
+        nameX: clamp(d.initial.nameX + ddx), nameY: clamp(d.initial.nameY + ddy),
+        numberX: clamp(d.initial.numberX + ddx), numberY: clamp(d.initial.numberY + ddy),
       }));
       return;
     }
     if (d.key === 'name' || d.key === 'number' || d.key === 'frontNumber' || d.key === 'paperName' || d.key === 'paperNumber') {
-      const prefix = d.key === 'paperName' ? 'paperName' : d.key === 'paperNumber' ? 'paperNumber' : d.key;
-      setSettings(old => ({
-        ...old,
-        [`${prefix}X`]: Math.max(0, Math.min(100, d.initial[`${prefix}X`] + dx)),
-        [`${prefix}Y`]: Math.max(0, Math.min(100, d.initial[`${prefix}Y`] + dy)),
-      }));
+      const prefix = d.key;
+      const x = snapX(d.initial[`${prefix}X`] + (lockX ? 0 : dx));
+      const y = snapY(d.initial[`${prefix}Y`] + (lockY ? 0 : dy));
+      track(x,y);
+      setSettings(old => ({ ...old, [`${prefix}X`]: x, [`${prefix}Y`]: y }));
       return;
     }
     if (String(d.key).startsWith('paperSponsor:')) {
@@ -614,24 +777,36 @@ function App() {
         sponsors: (old.sponsors || []).map(line => {
           if (line.id !== id) return line;
           const initial = d.initial.sponsors.find(x => x.id === id) || { paperX: line.paperX ?? 50, paperY: line.paperY ?? 10 };
-          return { ...line, paperX: Math.max(0, Math.min(100, (initial.paperX ?? 50) + dx)), paperY: Math.max(0, Math.min(100, (initial.paperY ?? 10) + dy)) };
+          return { ...line, paperX: Math.max(0, Math.min(100, (initial.paperX ?? 50) + (lockX ? 0 : dx))), paperY: Math.max(0, Math.min(100, (initial.paperY ?? 10) + (lockY ? 0 : dy))) };
         }),
       }));
       return;
     }
     if (String(d.key).startsWith('sponsor:')) {
       const id = Number(String(d.key).split(':')[1]);
+      const initial = d.initial.sponsors.find(x => x.id === id) || { x: 50, y: 12 };
+      const x = snapX(Number(initial.x ?? 50) + (lockX ? 0 : dx));
+      const y = snapY(Number(initial.y ?? 12) + (lockY ? 0 : dy));
+      track(x,y);
       setSettings(old => ({
         ...old,
-        sponsors: (old.sponsors || []).map(line => {
-          if (line.id !== id) return line;
-          const initial = d.initial.sponsors.find(x => x.id === id) || { x: line.x, y: line.y };
-          return { ...line, x: Math.max(0, Math.min(100, initial.x + dx)), y: Math.max(0, Math.min(100, initial.y + dy)) };
-        }),
+        sponsors: (old.sponsors || []).map(line => line.id === id ? { ...line, x, y } : line),
       }));
     }
   }
-  function finishDrag(e) { dragRef.current = null; try { svgRef.current?.releasePointerCapture(e.pointerId); } catch { } }
+  function finishDrag(e) {
+    const d = dragRef.current;
+    setGuideLines({x:null,y:null});dragRef.current = null;
+    try { svgRef.current?.releasePointerCapture(e.pointerId); } catch { }
+    const id = sponsorFocusRef.current;
+    sponsorFocusRef.current = null;
+    if (id != null && d && Math.hypot(e.clientX-d.startX,e.clientY-d.startY) < 5) {
+      requestAnimationFrame(() => {
+        const target = document.getElementById(`js-sponsor-text-${id}`);
+        target?.focus({preventScroll:true});target?.select();
+      });
+    }
+  }
 
   const fontOption = (value, setter) => <select value={value} onChange={e => setter(e.target.value)} style={{ fontFamily: value }}>{!fonts.includes(value) && <option value={value}>{value}</option>}{fonts.map(f => <option key={f} value={f}>{f}</option>)}</select>;
   const positionBar = (label, value, onChange) => <label className="range-field"><span>{label}<b>{value}%</b></span><input type="range" min="0" max="100" value={value} onChange={e => onChange(Number(e.target.value))} /></label>;
@@ -699,6 +874,43 @@ function App() {
     shadowOffsetY: settings.numberShadowOffsetY,
   };
 
+  // Contextual controls reuse the same existing text settings as the Properties panel.
+  // The canvas geometry, preset values and production export engine remain unchanged.
+  const selectedTextType = side === 'front' && settings.frontNumber && String(player?.number || '').trim() ? 'frontNumber' :
+    side === 'back' && (activeControl === 'name' || activeControl === 'number' || activeControl.startsWith('sponsor:')) ? activeControl : null;
+  const isNameSelected = selectedTextType === 'name';
+  const isNumberSelected = selectedTextType === 'number' || selectedTextType === 'frontNumber';
+  const selectedSponsor = selectedTextType?.startsWith('sponsor:') ? sponsorLayers.find(line => `sponsor:${line.id}` === selectedTextType) : null;
+  const currentTextLabel = isNameSelected ? 'Player name' : isNumberSelected ? 'Player number' : selectedSponsor ? 'Sponsor text' : '';
+  const currentFont = selectedSponsor ? (selectedSponsor.font || settings.nameFont) : isNameSelected ? settings.nameFont : settings.numberFont;
+  const currentPoints = selectedSponsor ? Number(selectedSponsor.points ?? 160) : isNameSelected ? Number(settings.namePoints) : selectedTextType === 'frontNumber' ? Number(settings.frontNumberPoints) : Number(settings.numberPoints);
+  const currentWidth = selectedSponsor ? Number(selectedSponsor.width ?? 12) : isNameSelected ? Number(settings.nameWidth) : selectedTextType === 'frontNumber' ? Number(settings.frontNumberWidth) : Number(settings.numberWidth);
+  const currentFill = selectedSponsor ? (selectedSponsor.fill || '#ffffff') : isNameSelected ? settings.nameFill : settings.numberFill;
+  const currentTextX = selectedSponsor ? Number(selectedSponsor.x ?? 50) : isNameSelected ? Number(settings.nameX) : selectedTextType === 'frontNumber' ? Number(settings.frontNumberX) : Number(settings.numberX);
+  const currentTextY = selectedSponsor ? Number(selectedSponsor.y ?? 12) : isNameSelected ? Number(settings.nameY) : selectedTextType === 'frontNumber' ? Number(settings.frontNumberY) : Number(settings.numberY);
+  function quickTextChange(patch) {
+    if (selectedSponsor) { updateSponsor(selectedSponsor.id, patch); return; }
+    const stem = isNameSelected ? 'name' : 'number';
+    setSettings(previous => {
+      const next = {...previous};
+      for (const [property, value] of Object.entries(patch)) {
+        const key = property === 'font' ? `${stem}Font` : property === 'points' ? selectedTextType === 'frontNumber' ? 'frontNumberPoints' : `${stem}Points` : property === 'width' ? selectedTextType === 'frontNumber' ? 'frontNumberWidth' : `${stem}Width` : property === 'fill' ? `${stem}Fill` : property === 'x' ? selectedTextType === 'frontNumber' ? 'frontNumberX' : `${stem}X` : property === 'y' ? selectedTextType === 'frontNumber' ? 'frontNumberY' : `${stem}Y` : null;
+        if (key) next[key] = value;
+      }
+      return next;
+    });
+  }
+  function openRightTool(tool) {
+    if (tool === 'export') { setExportReviewOpen(true); return; }
+    if (rightToolsOpen && rightTool === tool) { setRightToolsOpen(false); return; }
+    setRightTool(tool);
+    setSettingsTab(['text','fonts','effects','layers'].includes(tool) ? 'text' : tool === 'layout' ? 'layout' : 'parts');
+    setRightToolsOpen(true);
+    if (tool === 'fonts' || tool === 'effects' || tool === 'layers') {
+      requestAnimationFrame(() => requestAnimationFrame(() => document.getElementById(tool === 'fonts' ? 'js-fonts-section' : tool === 'effects' ? 'js-text-effects-section' : 'js-sponsor-section')?.scrollIntoView({block:'start',behavior:'smooth'})));
+    }
+  }
+
   return <div className="app">
     <aside className={`sidebar ${sidebarOpen ? '' : 'collapsed'}`}>
       <div className="brand"><span className="brand-symbol">JS</span>{sidebarOpen && <span><strong>JERSEY STUDIO</strong><small>SUBLIMATION WORKSPACE</small></span>}</div>
@@ -721,11 +933,32 @@ function App() {
             {drawer === 'import' ? <div className="import-panel"><h3>Import player roster</h3><p className="helper">Upload Excel (.xlsx / .xls), CSV, typed TXT, or an image of a handwritten or printed list. OCR is not guaranteed to read handwriting correctly.</p><label className="subtle full roster-upload">{importBusy ? 'Reading file...' : '↑ Choose roster file'}<input hidden type="file" disabled={importBusy} accept=".xlsx,.xls,.csv,.txt,.tsv,.png,.jpg,.jpeg,.webp,.bmp" onChange={e => { importRosterFile(e.target.files?.[0]); e.target.value = ''; }} /></label>{importFileName && <p className="helper">File: {importFileName}</p>}<div className="divider" /><h3>Or paste/type a list</h3><textarea rows={7} placeholder={'Name,Number,Size,Quantity,Sleeve\nRAHUL,07,38,2,Half\nAMAN,10,40,1,Full'} value={importText} onChange={e => setImportText(e.target.value)} /><button className="subtle full" disabled={importBusy} onClick={parsePastedText}>Parse typed list</button>{importStatus && <p className="import-status">{importStatus}</p>}{importResults.length > 0 && <><h3>Review extracted players ({importResults.length})</h3><div className="import-review">{importResults.map((p, i) => <div className="import-record" key={p.id}><label>Name<input value={p.name} onChange={e => setImportResults(rs => rs.map((r, j) => i === j ? { ...r, name: upper(e.target.value) } : r))} /></label><label>No<input value={p.number} onChange={e => setImportResults(rs => rs.map((r, j) => i === j ? { ...r, number: e.target.value } : r))} /></label><label>Size<input value={p.size} onChange={e => setImportResults(rs => rs.map((r, j) => i === j ? { ...r, size: e.target.value } : r))} /></label><label>Qty<input type="number" min="1" value={p.quantity} onChange={e => setImportResults(rs => rs.map((r, j) => i === j ? { ...r, quantity: Math.max(1, Number(e.target.value) || 1) } : r))} /></label><label>Sleeve<select value={p.sleeve} onChange={e => setImportResults(rs => rs.map((r, j) => i === j ? { ...r, sleeve: e.target.value } : r))}><option>Half</option><option>Full</option></select></label><button title="Remove extracted row" onClick={() => setImportResults(rs => rs.filter((_, j) => j !== i))}>×</button></div>)}</div><div className="import-actions"><button onClick={() => applyImport('replace')}>Replace player list</button><button onClick={() => applyImport('append')}>Add to player list</button></div></>}</div> : drawer === 'artwork' ? <div className="asset-list">{uploadTypes.map(([key, label]) => <div className="asset-with-delete" key={key}><label className="asset-upload"><span className="thumb">{art[key] ? <img src={art[key]} alt="" /> : '＋'}</span><span><strong>{label}</strong><small>{art[key] ? 'Replace image' : 'Select artwork'}</small></span><span className="upload-arrow">↗</span><input hidden type="file" accept=".png,.jpg,.jpeg,.webp,.pdf,.tif,.tiff" onChange={e => { readImage(e.target.files?.[0], src => setArt(a => ({ ...a, [key]: src }))); e.target.value = ''; }} /></label>{art[key] && <button className="asset-delete" title={`Remove ${label} artwork`} onClick={() => setArt(a => { const next = { ...a }; delete next[key]; return next; })}>🗑</button>}</div>)}<p className="helper">All artwork inputs are optional. Uploaded images remain in memory until you refresh.</p></div> : <div className="player-list"><div className="side-tools"><button className="subtle" onClick={addPlayer}>＋ Add player</button><button className="subtle" onClick={csvDownload}>↓ CSV</button><button className="subtle danger" onClick={clearPlayers}>🗑 Clear all</button></div>{players.map((p, i) => <div className={`player-card ${playerIndex === i ? 'current' : ''}`} key={p.id}><button className="player-pick" onClick={() => setPlayerIndex(i)}><strong>{p.name || 'Unnamed'}</strong><span>#{p.number || '—'} · {sizeLabel(canonicalSize(p.size, settings.sizes) || p.size)} · Q{p.quantity}</span></button><button className="trash" title="Remove player" onClick={() => removePlayer(p.id)}>×</button><div className="player-fields"><label>Name<input value={p.name} onChange={e => changePlayer(p.id, 'name', e.target.value)} /></label><label>Number<input value={p.number} onChange={e => changePlayer(p.id, 'number', e.target.value)} /></label><label>Size<select value={p.size} onChange={e => changePlayer(p.id, 'size', e.target.value)}>{!settings.sizes[canonicalSize(p.size, settings.sizes) || p.size] && <option value={p.size}>⚠ Unknown: {p.size}</option>}{sizes.map(s => <option key={s} value={s}>{sizeLabel(s)}</option>)}</select></label><label>Qty<input type="number" min="1" value={p.quantity} onChange={e => changePlayer(p.id, 'quantity', Math.max(1, Math.floor(Number(e.target.value) || 1)))} /></label><label className="wide">Sleeve<select value={p.sleeve} onChange={e => changePlayer(p.id, 'sleeve', e.target.value)}><option>Half</option><option>Full</option></select></label></div></div>)}<p className="helper">{players.length} records · {counts} total jerseys. Name and number can now be left blank if required.</p></div>}
           </section>
           <section className="center-area">
+            {textWasSelected && selectedTextType && player && <div className="selection-toolbar" aria-label={`${currentTextLabel} quick formatting`}>
+              <span className="selection-chip">{currentTextLabel}</span>
+              <label className="selection-field selection-font" title="Font family">Font
+                <select aria-label="Quick font family" value={currentFont} onChange={e => quickTextChange({font:e.target.value})}>
+                  {!fonts.includes(currentFont) && <option value={currentFont}>{currentFont}</option>}
+                  {fonts.map(font => <option key={font} value={font}>{font}</option>)}
+                </select>
+              </label>
+              <label className="selection-field selection-size" title="Font size in points">pt
+                <input aria-label="Quick font size" type="number" min="1" step="1" value={currentPoints} onChange={e => quickTextChange({points:Math.max(1,Number(e.target.value)||1)})}/>
+              </label>
+              <label className="selection-color" title="Text fill color"><input aria-label="Quick text color" type="color" value={currentFill} onChange={e => quickTextChange({fill:e.target.value})}/></label>
+              <button type="button" className="selection-action" onClick={() => openRightTool('effects')} title="Open existing effects controls">✧ Effects</button>
+              <label className="selection-field selection-dimension" title="Maximum text width in inches">W
+                <input aria-label="Quick max text width inches" type="number" min="0.1" step="0.25" value={currentWidth} onChange={e => quickTextChange({width:Math.max(.1,Number(e.target.value)||.1)})}/><span>in</span>
+              </label>
+              <span className="selection-field selection-autoheight" title="Text height is determined by the chosen font and point size">H auto</span>
+              <button type="button" className="selection-action" onClick={() => quickTextChange({x:50})} title="Align text to horizontal center">↔ Center</button>
+              <button type="button" className="selection-action" onClick={() => quickTextChange({y:50})} title="Align text to vertical center">↕ Center</button>
+              <span className="selection-location" title="Text anchor position">X {currentTextX.toFixed(0)}% · Y {currentTextY.toFixed(0)}%</span>
+            </div>}
             <div className="canvas-toolbar"><div className="segmented">
               {[["back","Back"],["front","Front"],["halfSleeve","Half sleeve"],["fullSleeve","Full sleeve"],["collar","Collar"]].map(([key,label])=><button key={key} className={side===key?'selected':''} onClick={()=>setSide(key)}>{label}</button>)}
-            </div><div className="preview-toolbar-right">{side==='back'&&<label className="paper-export-switch"><input type="checkbox" checked={settings.backPaperEnabled!==false} onChange={e=>set('backPaperEnabled',e.target.checked)}/> Include paper print in ZIP</label>}<span>{sleeveView ? `${sleeveViewDims.width} × ${sleeveViewDims.height} in (each side)` : side==='collar'?`${settings.collarWidth} × ${settings.collarHeight} in`:`${realWidth} × ${realHeight} in`}</span></div></div>
-            <div className="stage ruler-stage">
-              <div className="ruler-preview-area" style={{'--page-ruler-width':sleeveView?sleeveViewDims.width*2+sleeveGap:side==='collar'?settings.collarWidth:realWidth,'--page-ruler-height':sleeveView?sleeveViewDims.height:side==='collar'?settings.collarHeight:realHeight}}>
+            </div><div className="preview-toolbar-right"><div className="preview-zoom-controls" title="Hold Ctrl and scroll over the canvas to zoom"><button type="button" aria-label="Zoom out" onClick={()=>setPreviewZoom(z=>Math.max(50,z-10))}>−</button><span>{previewZoom}%</span><button type="button" aria-label="Zoom in" onClick={()=>setPreviewZoom(z=>Math.min(300,z+10))}>+</button><button type="button" onClick={()=>setPreviewZoom(100)}>Reset</button></div>{side==='back'&&<label className="paper-export-switch"><input type="checkbox" checked={settings.backPaperEnabled!==false} onChange={e=>set('backPaperEnabled',e.target.checked)}/> Include paper print in ZIP</label>}<span>{sleeveView ? `${sleeveViewDims.width} × ${sleeveViewDims.height} in (each side)` : side==='collar'?`${settings.collarWidth} × ${settings.collarHeight} in`:`${realWidth} × ${realHeight} in`}</span></div></div>
+            <div className="stage ruler-stage" ref={stageRef} onPointerDown={startPan}>
+              <div className="ruler-preview-area" style={{zoom:previewZoom/100,'--page-ruler-width':sleeveView?sleeveViewDims.width*2+sleeveGap:side==='collar'?settings.collarWidth:realWidth,'--page-ruler-height':sleeveView?sleeveViewDims.height:side==='collar'?settings.collarHeight:realHeight}}>
                 <div className="ruler-corner">in</div>
                 <div className="inch-ruler inch-ruler-top">{Array.from({length:Math.floor(sleeveView?sleeveViewDims.width*2+sleeveGap:side==='collar'?settings.collarWidth:realWidth)+1},(_,i)=><span key={i} style={{left:`${i/Math.max(1,sleeveView?sleeveViewDims.width*2+sleeveGap:side==='collar'?settings.collarWidth:realWidth)*100}%`}}>{i}</span>)}</div>
                 <div className="inch-ruler inch-ruler-left">{Array.from({length:Math.floor(sleeveView?sleeveViewDims.height:side==='collar'?settings.collarHeight:realHeight)+1},(_,i)=><span key={i} style={{top:`${i/Math.max(1,sleeveView?sleeveViewDims.height:side==='collar'?settings.collarHeight:realHeight)*100}%`}}>{i}</span>)}</div>
@@ -733,12 +966,41 @@ function App() {
                   {sleeveView ? <div className="paired-pieces">
                     {['left','right'].map(which=>{const src=art[`${which}${sleeveViewType}Sleeve`]||art[sleeveViewType==='Full'?'fullSleeve':'halfSleeve']||art[`${which}Sleeve`]||art[`${which==='left'?'right':'left'}${sleeveViewType}Sleeve`]; const mirrored=!art[`${which}${sleeveViewType}Sleeve`]&&!art[sleeveViewType==='Full'?'fullSleeve':'halfSleeve']&&!art[`${which}Sleeve`];return <div className="paired-piece" key={which} style={{width:`${sleeveViewDims.width/(sleeveViewDims.width*2+sleeveGap)*100}%`}}>{src?<img src={src} alt={`${which} ${sleeveViewType} sleeve`} style={{transform:mirrored?'scaleX(-1)':'none'}}/>:<span>Upload {which} {sleeveViewType.toLowerCase()} sleeve</span>}<b>{which.toUpperCase()} · {sleeveViewDims.width} × {sleeveViewDims.height} in</b></div>})}
                   </div> : image ? <img className="base-art" src={image} alt={`${side} uploaded artwork`} /> : <div className="canvas-empty">Upload {side} artwork<small>The full production page appears here</small></div>}
-              <svg ref={svgRef} style={{display:side==='back'||side==='front'?undefined:'none'}} className="template-overlay" viewBox={`0 0 ${realWidth * u} ${realHeight * u}`} preserveAspectRatio="none" onPointerMove={dragMove} onPointerUp={finishDrag} onPointerCancel={finishDrag}>
-                {side === 'back' && settings.topMarkEnabled && <rect className="top-mark" x={(realWidth * u) / 2 - scaledBox(settings.topMarkWidth, settings.topMarkHeight).width * u / 2} y="0" width={scaledBox(settings.topMarkWidth, settings.topMarkHeight).width * u} height={scaledBox(settings.topMarkWidth, settings.topMarkHeight).height * u} fill={settings.topMarkFill} />}
-                {player && side === 'back' && String(player.name || '').trim() && <FixedText value={player.name} cx={settings.nameX} cy={settings.nameY} width={scaledNameWidth} points={scaledNamePoints * (u / 72)} fontFamily={settings.nameFont} fill={settings.nameFill} stroke={settings.nameStroke} outlineWidth={settings.nameOutlineWidth} selected={activeControl === 'name'} onSelect={() => setActiveControl('name')} onMove={e => startDrag('name', e)} pageWidth={realWidth} pageHeight={realHeight} curve={settings.nameCurve} gradientEnabled={settings.nameGradientEnabled} gradientStart={settings.nameGradientStart} gradientEnd={settings.nameGradientEnd} gradientDirection={settings.nameGradientDirection} shadowEnabled={settings.nameShadowEnabled} shadowColor={settings.nameShadowColor} shadowBlur={settings.nameShadowBlur} shadowOffsetX={settings.nameShadowOffsetX} shadowOffsetY={settings.nameShadowOffsetY} />}
-                {player && ((side === 'back') || (side === 'front' && settings.frontNumber)) && String(player.number || '').trim() && <FixedText value={player.number} cx={side === 'back' ? settings.numberX : settings.frontNumberX} cy={side === 'back' ? settings.numberY : settings.frontNumberY} width={side === 'back' ? scaledNumberWidth : scaleWidth(settings.frontNumberWidth || 4, realWidth)} points={(side === 'back' ? scaledNumberPoints : scalePoints(settings.frontNumberPoints || 300, realWidth)) * (u / 72)} fontFamily={settings.numberFont} fill={settings.numberFill} stroke={settings.numberStroke} outlineWidth={settings.numberOutlineWidth} selected={activeControl === (side === 'front' ? 'frontNumber' : 'number')} onSelect={() => setActiveControl(side === 'front' ? 'frontNumber' : 'number')} onMove={e => startDrag(side === 'front' ? 'frontNumber' : 'number', e)} pageWidth={realWidth} pageHeight={realHeight} curve={settings.numberCurve} gradientEnabled={settings.numberGradientEnabled} gradientStart={settings.numberGradientStart} gradientEnd={settings.numberGradientEnd} gradientDirection={settings.numberGradientDirection} shadowEnabled={settings.numberShadowEnabled} shadowColor={settings.numberShadowColor} shadowBlur={settings.numberShadowBlur} shadowOffsetX={settings.numberShadowOffsetX} shadowOffsetY={settings.numberShadowOffsetY} />}
-                {side === 'back' && settings.sponsorEnabled && sponsorLayers.filter(line => line.enabled !== false && String(line.text || '').trim()).map(line => <FixedText key={line.id} value={line.text} cx={line.x ?? 50} cy={line.y ?? 12} width={scaleWidth(line.width ?? 12, realWidth)} points={scalePoints(line.points ?? 160, realWidth) * (u / 72)} fontFamily={line.font || settings.nameFont} fill={line.fill || '#ffffff'} stroke={line.stroke || '#111111'} outlineWidth={line.outlineWidth ?? 0} selected={activeControl === `sponsor:${line.id}`} onSelect={() => setActiveControl(`sponsor:${line.id}`)} onMove={e => startDrag(`sponsor:${line.id}`, e)} pageWidth={realWidth} pageHeight={realHeight} curve={line.curve ?? 0} gradientEnabled={line.gradientEnabled} gradientStart={line.gradientStart} gradientEnd={line.gradientEnd} gradientDirection={line.gradientDirection || 'horizontal'} shadowEnabled={line.shadowEnabled} shadowColor={line.shadowColor || '#000000'} shadowBlur={line.shadowBlur || 0} shadowOffsetX={line.shadowOffsetX || 0} shadowOffsetY={line.shadowOffsetY || 0} />)}
-                {side === 'back' && settings.bottomMarkEnabled && <g><rect x={(realWidth * u) / 2 - scaledBox(settings.bottomMarkWidth, settings.bottomMarkHeight).width * u / 2} y={realHeight * u - scaledBox(settings.bottomMarkWidth, settings.bottomMarkHeight).height * u} width={scaledBox(settings.bottomMarkWidth, settings.bottomMarkHeight).width * u} height={scaledBox(settings.bottomMarkWidth, settings.bottomMarkHeight).height * u} fill={settings.bottomMarkFill} /><text x="50%" y={realHeight * u - scaledBox(settings.bottomMarkWidth, settings.bottomMarkHeight).height * u / 2} dominantBaseline="middle" textAnchor="middle" fill={settings.bottomMarkTextFill} fontWeight="800" fontFamily="Arial" fontSize={Math.max(9, scaledBox(settings.bottomMarkWidth, settings.bottomMarkHeight).height * u * .55)}>{currentSize}</text></g>}
+              <svg ref={svgRef} style={{display:side==='back'||side==='front'?undefined:'none'}} className="template-overlay" onPointerDown={e => { if(e.target === e.currentTarget) setTextWasSelected(false); }} viewBox={`0 0 ${realWidth * u} ${realHeight * u}`} preserveAspectRatio="none" onPointerMove={dragMove} onPointerUp={finishDrag} onPointerCancel={finishDrag}>
+                {settings.smartGuidesEnabled && dragRef.current && (side === 'back' || side === 'front') && <g pointerEvents="none" className="smart-guide-lines">
+                  {guideLines.x != null && <line x1={guideLines.x * realWidth * u / 100} y1="0" x2={guideLines.x * realWidth * u / 100} y2={realHeight*u} stroke={settings.smartGuideColor || '#00f0ff'} strokeWidth="2.4" strokeDasharray="10 7" />}
+                  {guideLines.y != null && <line x1="0" y1={guideLines.y * realHeight * u / 100} x2={realWidth*u} y2={guideLines.y * realHeight * u / 100} stroke={settings.smartGuideColor || '#00f0ff'} strokeWidth="2.4" strokeDasharray="10 7" />}
+                </g>}
+                {(side === 'back' || side === 'front') && settings.topMarkEnabled && <rect x={(realWidth * u) / 2 - scaledBox(settings.topMarkWidth, settings.topMarkHeight).width * u / 2} y="0" width={scaledBox(settings.topMarkWidth, settings.topMarkHeight).width * u} height={scaledBox(settings.topMarkWidth, settings.topMarkHeight).height * u} fill={settings.topMarkFill} />}
+                {player && side === 'back' && String(player.name || '').trim() && <FixedText value={player.name} cx={settings.nameX} cy={settings.nameY} width={scaledNameWidth} points={scaledNamePoints * (u / 72)} fontFamily={settings.nameFont} fill={settings.nameFill} stroke={settings.nameStroke} outlineWidth={settings.nameOutlineWidth} selected={activeControl === 'name'} onSelect={() => { setActiveControl('name'); setTextWasSelected(true); }} onMove={e => startDrag('name', e)} pageWidth={realWidth} pageHeight={realHeight} curve={settings.nameCurve} gradientEnabled={settings.nameGradientEnabled} gradientStart={settings.nameGradientStart} gradientEnd={settings.nameGradientEnd} gradientDirection={settings.nameGradientDirection} shadowEnabled={settings.nameShadowEnabled} shadowColor={settings.nameShadowColor} shadowBlur={settings.nameShadowBlur} shadowOffsetX={settings.nameShadowOffsetX} shadowOffsetY={settings.nameShadowOffsetY} />}
+                {player && ((side === 'back') || (side === 'front' && settings.frontNumber)) && String(player.number || '').trim() && <FixedText value={player.number} cx={side === 'back' ? settings.numberX : settings.frontNumberX} cy={side === 'back' ? settings.numberY : settings.frontNumberY} width={side === 'back' ? scaledNumberWidth : scaleWidth(settings.frontNumberWidth || 4, realWidth)} points={(side === 'back' ? scaledNumberPoints : scalePoints(settings.frontNumberPoints || 300, realWidth)) * (u / 72)} fontFamily={settings.numberFont} fill={settings.numberFill} stroke={settings.numberStroke} outlineWidth={settings.numberOutlineWidth} selected={activeControl === (side === 'front' ? 'frontNumber' : 'number')} onSelect={() => { setActiveControl(side === 'front' ? 'frontNumber' : 'number'); setTextWasSelected(true); }} onMove={e => startDrag(side === 'front' ? 'frontNumber' : 'number', e)} pageWidth={realWidth} pageHeight={realHeight} curve={settings.numberCurve} gradientEnabled={settings.numberGradientEnabled} gradientStart={settings.numberGradientStart} gradientEnd={settings.numberGradientEnd} gradientDirection={settings.numberGradientDirection} shadowEnabled={settings.numberShadowEnabled} shadowColor={settings.numberShadowColor} shadowBlur={settings.numberShadowBlur} shadowOffsetX={settings.numberShadowOffsetX} shadowOffsetY={settings.numberShadowOffsetY} />}
+                {side === 'back' && settings.sponsorEnabled && sponsorLayers.filter(line => line.enabled !== false && String(line.text || '').trim()).map(line => <FixedText key={line.id} value={line.text} cx={line.x ?? 50} cy={line.y ?? 12} width={scaleWidth(line.width ?? 12, realWidth)} points={scalePoints(line.points ?? 160, realWidth) * (u / 72)} fontFamily={line.font || settings.nameFont} fill={line.fill || '#ffffff'} stroke={line.stroke || '#111111'} outlineWidth={line.outlineWidth ?? 0} selected={activeControl === `sponsor:${line.id}`} onSelect={() => openSponsorEditor(line.id)} onMove={e => startDrag(`sponsor:${line.id}`, e)} pageWidth={realWidth} pageHeight={realHeight} curve={line.curve ?? 0} gradientEnabled={line.gradientEnabled} gradientStart={line.gradientStart} gradientEnd={line.gradientEnd} gradientDirection={line.gradientDirection || 'horizontal'} shadowEnabled={line.shadowEnabled} shadowColor={line.shadowColor || '#000000'} shadowBlur={line.shadowBlur || 0} shadowOffsetX={line.shadowOffsetX || 0} shadowOffsetY={line.shadowOffsetY || 0} />)}
+                {side === 'back' && player?.sleeve === 'Full' && settings.sleeveMarkEnabled !== false && (() => {
+                  const location = settings.sleeveMarkPosition || 'bottom-left';
+                  // The master identifier is a 0.5 × 0.5 inch square at M (21 × 29).
+                  // Dimensions scale with the selected jersey page, matching the main marks.
+                  const baseInches = Math.max(0.1, Number(settings.sleeveMarkHeight ?? .5));
+                  const markerWidth = baseInches * (realWidth / 21) * u;
+                  const markerHeight = baseInches * (realHeight / 29) * u;
+                  const edgePad = Math.max(2, .045*u);
+                  const x = location.endsWith('left') ? edgePad+markerWidth/2 : location.endsWith('right') ? realWidth*u-edgePad-markerWidth/2 : realWidth*u/2;
+                  const y = location.startsWith('top') ? edgePad+markerHeight/2 : realHeight*u-edgePad-markerHeight/2;
+                  const color = settings.sleeveMarkFill || '#000000';
+                  return <g pointerEvents="none"><text x={x} y={y} dominantBaseline="central" textAnchor="middle" textLength={markerWidth*.94} lengthAdjust="spacingAndGlyphs" fontFamily="Arial" fontWeight="900" fontSize={markerHeight*.54} stroke="#ffffff" strokeWidth={Math.max(.8,markerHeight*.08)} paintOrder="stroke" fill={color}>{settings.sleeveMarkText || 'FULL SLEEVE'}</text></g>;
+                })()}
+                {(side === 'back' || side === 'front') && settings.markPreset !== 'dual-edge' && settings.bottomMarkEnabled !== false && (() => {
+                  const box = scaledBox(settings.bottomMarkWidth ?? .5, settings.bottomMarkHeight ?? .5);
+                  const bw = box.width*u, bh = box.height*u;
+                  const x = (realWidth*u-bw)/2, y = realHeight*u-bh;
+                  return <g pointerEvents="none"><rect x={x} y={y} width={bw} height={bh} fill={settings.bottomMarkFill||'#000000'}/><text x={realWidth*u/2} y={y+bh/2} dominantBaseline="middle" textAnchor="middle" fontFamily="Arial" fontSize={bh*.55} fontWeight="900" fill={settings.bottomMarkTextFill||'#ffffff'}>{currentSize}</text></g>;
+                })()}
+                {settings.markPreset === 'dual-edge' && (side === 'back' || side === 'front') && settings.topMarkEnabled !== false && <rect x={(realWidth*u)/2 - scaledBox(settings.topMarkWidth,settings.topMarkHeight).width*u/2} y={realHeight*u - scaledBox(settings.topMarkWidth,settings.topMarkHeight).height*u} width={scaledBox(settings.topMarkWidth,settings.topMarkHeight).width*u} height={scaledBox(settings.topMarkWidth,settings.topMarkHeight).height*u} fill={settings.topMarkFill}/>}
+                {settings.markPreset === 'dual-edge' && settings.markLabelEnabled !== false && (side === 'back' || side === 'front') && (() => {
+                  const pos = settings.markLabelPosition || 'bottom-left';
+                  const x = pos.includes('left') ? 3 : pos.includes('right') ? 97 : 50;
+                  const y = pos.startsWith('top') ? 2 : pos.startsWith('bottom') ? 98 : 50;
+                  return <text x={`${x}%`} y={`${y}%`} dominantBaseline="middle" textAnchor={pos.includes('left')?'start':pos.includes('right')?'end':'middle'} fontFamily="Arial" fontSize={Math.max(10,realWidth*u*.021)} fontWeight="900" paintOrder="stroke" stroke={settings.markLabelBackground||'#000000'} strokeWidth="5" fill={settings.markLabelColor||'#ffffff'}>{sizeLabel(currentSize).replace(/ \(.*\)$/,'')}-{player?.quantity || 1}</text>;
+                })()}
               </svg>
                 </div>
               </div>
@@ -746,14 +1008,15 @@ function App() {
             <div className="preview-footer"><button onClick={() => setPlayerIndex(i => Math.max(0, i - 1))}>← Previous</button><div><strong>{player?.name || 'No player selected'}</strong><span>{player ? `#${player.number || '—'} · ${sizeLabel(currentSize)} · ${player.sleeve}` : 'Add a player or import a roster'}</span></div><button onClick={() => setPlayerIndex(i => Math.min(players.length - 1, i + 1))}>Next →</button></div>
             <p className="editor-note">M size (21 × 29) is the master. Name = 195 pt, max 12 inches. Number = 650 pt, max 12 inches. Other sizes scale dynamically. Height varies naturally by font family.</p>
           </section>
-          <aside className="properties panel"><div className="panel-heading"><h2>Properties</h2><span className="tiny-tag">LIVE</span></div><div className="tabbar property-tabs">{[['text', 'Text'], ['layout', 'Layout'], ['parts', 'Parts']].map(([key, label]) => <button key={key} className={settingsTab === key ? 'selected' : ''} onClick={() => setSettingsTab(key)}>{label}</button>)}</div>
+          <div className={`right-workspace ${rightToolsOpen ? 'right-workspace-open' : ''}`}>
+          <aside className="properties panel" aria-label="Detailed editing controls"><div className="panel-heading"><h2>Properties</h2><span className="tiny-tag">LIVE</span></div><div className="tabbar property-tabs">{[['text', 'Text'], ['layout', 'Layout'], ['parts', 'Parts']].map(([key, label]) => <button key={key} className={settingsTab === key ? 'selected' : ''} onClick={() => setSettingsTab(key)}>{label}</button>)}</div>
             {settingsTab === 'text' ? <div className="property-content">
-              <h3>Fonts</h3>
+              <h3 id="js-fonts-section">Fonts</h3>
               <button className="subtle full" onClick={findLocalFonts}>⌕ Detect installed fonts</button>
               <p className="helper">{fontStatus}</p>
               <label className="subtle full font-upload">＋ Upload custom font<input hidden type="file" accept=".ttf,.otf,.woff,.woff2" onChange={e => { uploadFont(e.target.files?.[0]); e.target.value = ''; }} /></label>
               <div className="divider" />
-              <h3>Player name</h3>
+              <h3 id="js-text-effects-section">Player name</h3>
               <label className="field">Name font{fontOption(settings.nameFont, v => set('nameFont', v))}</label>
               {textEffectControls('name', { ...nameConfig, font: settings.nameFont }, patch => setSettings(s => ({ ...s, nameFont: patch.font ?? s.nameFont, namePoints: patch.points ?? s.namePoints, nameWidth: patch.width ?? s.nameWidth, nameFill: patch.fill ?? s.nameFill, nameStroke: patch.stroke ?? s.nameStroke, nameOutlineWidth: patch.outlineWidth ?? s.nameOutlineWidth, nameCurve: patch.curve ?? s.nameCurve, nameGradientEnabled: patch.gradientEnabled ?? s.nameGradientEnabled, nameGradientStart: patch.gradientStart ?? s.nameGradientStart, nameGradientEnd: patch.gradientEnd ?? s.nameGradientEnd, nameGradientDirection: patch.gradientDirection ?? s.nameGradientDirection, nameShadowEnabled: patch.shadowEnabled ?? s.nameShadowEnabled, nameShadowColor: patch.shadowColor ?? s.nameShadowColor, nameShadowBlur: patch.shadowBlur ?? s.nameShadowBlur, nameShadowOffsetX: patch.shadowOffsetX ?? s.nameShadowOffsetX, nameShadowOffsetY: patch.shadowOffsetY ?? s.nameShadowOffsetY })), null, resetNameSettings)}
               <div className="divider" />
@@ -762,11 +1025,22 @@ function App() {
               {textEffectControls('number', { ...numberConfig, font: settings.numberFont }, patch => setSettings(s => ({ ...s, numberFont: patch.font ?? s.numberFont, numberPoints: patch.points ?? s.numberPoints, numberWidth: patch.width ?? s.numberWidth, numberFill: patch.fill ?? s.numberFill, numberStroke: patch.stroke ?? s.numberStroke, numberOutlineWidth: patch.outlineWidth ?? s.numberOutlineWidth, numberCurve: patch.curve ?? s.numberCurve, numberGradientEnabled: patch.gradientEnabled ?? s.numberGradientEnabled, numberGradientStart: patch.gradientStart ?? s.numberGradientStart, numberGradientEnd: patch.gradientEnd ?? s.numberGradientEnd, numberGradientDirection: patch.gradientDirection ?? s.numberGradientDirection, numberShadowEnabled: patch.shadowEnabled ?? s.numberShadowEnabled, numberShadowColor: patch.shadowColor ?? s.numberShadowColor, numberShadowBlur: patch.shadowBlur ?? s.numberShadowBlur, numberShadowOffsetX: patch.shadowOffsetX ?? s.numberShadowOffsetX, numberShadowOffsetY: patch.shadowOffsetY ?? s.numberShadowOffsetY })), null, resetNumberSettings)}
               <p className="inline-note">Name and number now use fixed master rules at M size, then scale automatically for other jersey sizes.</p>
               <div className="divider" />
-              <h3>Sponsor text layers</h3>
+              <h3 id="js-sponsor-section">Sponsor text layers</h3>
               <label className="check"><input type="checkbox" checked={settings.sponsorEnabled} onChange={e => set('sponsorEnabled', e.target.checked)} />Enable sponsor text layers</label>
               <button className="subtle full" onClick={addSponsor}>＋ Add sponsor line</button>
-              <div className="sponsor-list">{sponsorLayers.map(line => <div key={line.id} className={`sponsor-item ${activeControl === `sponsor:${line.id}` ? 'active' : ''}`}><div className="sponsor-head"><strong>{line.label || `Sponsor ${line.id}`}</strong><div className="sponsor-actions"><button type="button" onClick={() => setActiveControl(`sponsor:${line.id}`)}>Select</button><button type="button" onClick={() => removeSponsor(line.id)}>Delete</button></div></div><label className="check"><input type="checkbox" checked={line.enabled !== false} onChange={e => updateSponsor(line.id, { enabled: e.target.checked })} />Enabled</label><label className="field"><span>Label</span><input value={line.label || ''} onChange={e => updateSponsor(line.id, { label: e.target.value })} /></label><label className="field textarea-field"><span>Text</span><textarea value={line.text || ''} onChange={e => updateSponsor(line.id, { text: e.target.value })} /></label><label className="field">Font{fontOption(line.font || settings.nameFont, v => updateSponsor(line.id, { font: v }))}</label>{textEffectControls('sponsor', { points: line.points ?? 160, width: line.width ?? 12, fill: line.fill ?? '#ffffff', stroke: line.stroke ?? '#111111', outlineWidth: line.outlineWidth ?? 0, curve: line.curve ?? 0, gradientEnabled: line.gradientEnabled ?? false, gradientStart: line.gradientStart ?? '#ffffff', gradientEnd: line.gradientEnd ?? '#ffffff', gradientDirection: line.gradientDirection ?? 'horizontal', shadowEnabled: line.shadowEnabled ?? false, shadowColor: line.shadowColor ?? '#000000', shadowBlur: line.shadowBlur ?? 0, shadowOffsetX: line.shadowOffsetX ?? 0, shadowOffsetY: line.shadowOffsetY ?? 0 }, patch => updateSponsor(line.id, patch))}</div>)}</div>
-            </div> : settingsTab === 'layout' ? <div className="property-content"><h3>Size chart profiles</h3><label className="field">Active chart<select value={activeChart} onChange={e => setActiveChart(e.target.value)}>{Object.keys(chartNames).map(n => <option key={n} value={n}>{n}</option>)}</select></label><div className="profile-actions"><button className="subtle" onClick={createChart}>＋ Create chart</button>{activeChart !== 'Standard' && <button className="subtle danger" onClick={deleteChart}>Delete chart</button>}</div><p className="helper">Standard is your official locked size chart. Create unlimited named copies to customize inches.</p><h3>Page preset</h3><label className="field">Size<select value={settings.editSize} onChange={e => set('editSize', e.target.value)}>{sizes.map(s => <option key={s} value={s}>{sizeLabel(s)}</option>)}</select></label><div className="two-cols"><Field label="Width (in)" disabled={activeChart === 'Standard'} value={settings.sizes[settings.editSize].width} step={.25} onChange={v => updateDimension('width', v)} /><Field label="Height (in)" disabled={activeChart === 'Standard'} value={settings.sizes[settings.editSize].height} step={.25} onChange={v => updateDimension('height', v)} /></div><button className="subtle full" disabled={activeChart === 'Standard'} onClick={addSize}>＋ Add size preset</button><p className="helper">Official size chart loaded automatically. {sizeLabel(currentSize)} uses {dimensions.width} × {dimensions.height} inches. The standard chart includes 6 months = 12 × 18 inches.</p><div className="divider" /><h3>Positioning</h3><label className="check"><input type="checkbox" checked={grouped} onChange={e => setGrouped(e.target.checked)} />Move name & number together</label><label className="field">Selected element<select value={activeControl} onChange={e => setActiveControl(e.target.value)}><option value="name">Name</option><option value="number">Back number</option><option value="frontNumber">Front number</option>{sponsorOptions.map(item => <option key={item.id} value={`sponsor:${item.id}`}>{item.label}</option>)}</select></label>{positionBar('Name horizontal', settings.nameX, v => set('nameX', v))}{positionBar('Name vertical', settings.nameY, v => set('nameY', v))}{positionBar('Number horizontal', settings.numberX, v => set('numberX', v))}{positionBar('Number vertical', settings.numberY, v => set('numberY', v))}{positionBar('Front no. horizontal', settings.frontNumberX, v => set('frontNumberX', v))}{positionBar('Front no. vertical', settings.frontNumberY, v => set('frontNumberY', v))}{activeSponsor && <><div className="divider" /><h3>Selected sponsor position</h3>{positionBar('Sponsor horizontal', activeSponsor.x ?? 50, v => updateSponsor(activeSponsor.id, { x: v }))}{positionBar('Sponsor vertical', activeSponsor.y ?? 12, v => updateSponsor(activeSponsor.id, { y: v }))}</>}<div className="nudge"><button onClick={() => adjustPosition('x', -1)}>←</button><button onClick={() => adjustPosition('y', -1)}>↑</button><button onClick={() => adjustPosition('y', 1)}>↓</button><button onClick={() => adjustPosition('x', 1)}>→</button></div><button className="subtle full" onClick={resetPosition}>Reset positions</button><p className="helper">Drag the text directly on the canvas, or use sliders and arrows. Sponsor lines are individually movable.</p></div> : <div className="property-content"><h3>Registration marks</h3><label className="check"><input type="checkbox" checked={settings.bottomMarkEnabled} onChange={e => set('bottomMarkEnabled', e.target.checked)} />Bottom centered size square (touching edge)</label><div className="two-cols"><Field label="Bottom width (in)" value={settings.bottomMarkWidth} step={.05} onChange={v => set('bottomMarkWidth', v)} /><Field label="Bottom height (in)" value={settings.bottomMarkHeight} step={.05} onChange={v => set('bottomMarkHeight', v)} /></div><ColorField label="Bottom box color" value={settings.bottomMarkFill} onChange={v => set('bottomMarkFill', v)} /><ColorField label="Size text color" value={settings.bottomMarkTextFill} onChange={v => set('bottomMarkTextFill', v)} /><label className="check"><input type="checkbox" checked={settings.topMarkEnabled} onChange={e => set('topMarkEnabled', e.target.checked)} />Top centered rectangle (touching edge)</label><div className="two-cols"><Field label="Top width (in)" value={settings.topMarkWidth} step={.05} onChange={v => set('topMarkWidth', v)} /><Field label="Top height (in)" value={settings.topMarkHeight} step={.05} onChange={v => set('topMarkHeight', v)} /></div><ColorField label="Top mark color" value={settings.topMarkFill} onChange={v => set('topMarkFill', v)} /><div className="divider"/><h3>Back print identifier — Full Sleeve orders only</h3><label className="check"><input type="checkbox" checked={settings.sleeveMarkEnabled} onChange={e => set('sleeveMarkEnabled', e.target.checked)} />Mark the BACK print when player sleeve type is Full</label><label className="field">Identifier text (default: FULL SLEEVE)<input type="text" value={settings.sleeveMarkText} onChange={e => set('sleeveMarkText', e.target.value)} /></label><label className="field">Position<select value={settings.sleeveMarkPosition} onChange={e => set('sleeveMarkPosition', e.target.value)}><option value="bottom-left">Bottom left (edge)</option><option value="bottom-center">Bottom center</option><option value="bottom-right">Bottom right</option><option value="top-left">Top left</option><option value="top-right">Top right</option></select></label><Field label="Identifier height (in)" step={.05} value={settings.sleeveMarkHeight} onChange={v => set('sleeveMarkHeight', v)} /><ColorField label="Back identifier color" value={settings.sleeveMarkFill} onChange={v => set('sleeveMarkFill', v)} /><div className="divider" /><h3>Front number</h3><label className="check"><input type="checkbox" checked={settings.frontNumber} onChange={e => set('frontNumber', e.target.checked)} />Enable front number</label><div className="two-cols"><Field label="Front width (in)" value={settings.frontNumberWidth} step={.25} onChange={v => set('frontNumberWidth', v)} /><Field label="Front font size (pt)" value={settings.frontNumberPoints} step={1} onChange={v => set('frontNumberPoints', v)} /></div><p className="helper">Front number is now movable on the front preview only. It no longer appears on sleeves or collar.</p><div className="divider" /><h3>Sleeve size chart</h3>
+              <div className="sponsor-list">{sponsorLayers.map(line => <div key={line.id} className={`sponsor-item ${activeControl === `sponsor:${line.id}` ? 'active' : ''}`}><div className="sponsor-head"><strong>{line.label || `Sponsor ${line.id}`}</strong><div className="sponsor-actions"><button type="button" onClick={() => openSponsorEditor(line.id,true)}>Select &amp; edit</button><button type="button" onClick={() => removeSponsor(line.id)}>Delete</button></div></div><label className="check"><input type="checkbox" checked={line.enabled !== false} onChange={e => updateSponsor(line.id, { enabled: e.target.checked })} />Enabled</label><label className="field"><span>Label</span><input value={line.label || ''} onChange={e => updateSponsor(line.id, { label: e.target.value })} /></label><label className="field textarea-field"><span>Text</span><textarea id={`js-sponsor-text-${line.id}`} value={line.text || ''} onChange={e => updateSponsor(line.id, { text: e.target.value })} /></label><label className="field">Font{fontOption(line.font || settings.nameFont, v => updateSponsor(line.id, { font: v }))}</label>{textEffectControls('sponsor', { points: line.points ?? 160, width: line.width ?? 12, fill: line.fill ?? '#ffffff', stroke: line.stroke ?? '#111111', outlineWidth: line.outlineWidth ?? 0, curve: line.curve ?? 0, gradientEnabled: line.gradientEnabled ?? false, gradientStart: line.gradientStart ?? '#ffffff', gradientEnd: line.gradientEnd ?? '#ffffff', gradientDirection: line.gradientDirection ?? 'horizontal', shadowEnabled: line.shadowEnabled ?? false, shadowColor: line.shadowColor ?? '#000000', shadowBlur: line.shadowBlur ?? 0, shadowOffsetX: line.shadowOffsetX ?? 0, shadowOffsetY: line.shadowOffsetY ?? 0 }, patch => updateSponsor(line.id, patch))}</div>)}</div>
+            </div> : settingsTab === 'layout' ? <div className="property-content"><h3>Size chart profiles</h3><label className="field">Active chart<select value={activeChart} onChange={e => setActiveChart(e.target.value)}>{Object.keys(chartNames).map(n => <option key={n} value={n}>{n}</option>)}</select></label><div className="profile-actions"><button className="subtle" onClick={createChart}>＋ Create chart</button>{activeChart !== 'Standard' && <button className="subtle danger" onClick={deleteChart}>Delete chart</button>}</div><p className="helper">Standard is your official locked size chart. Create unlimited named copies to customize inches.</p><h3>Page preset</h3><label className="field">Size<select value={settings.editSize} onChange={e => set('editSize', e.target.value)}>{sizes.map(s => <option key={s} value={s}>{sizeLabel(s)}</option>)}</select></label><div className="two-cols"><Field label="Width (in)" disabled={activeChart === 'Standard'} value={settings.sizes[settings.editSize].width} step={.25} onChange={v => updateDimension('width', v)} /><Field label="Height (in)" disabled={activeChart === 'Standard'} value={settings.sizes[settings.editSize].height} step={.25} onChange={v => updateDimension('height', v)} /></div><button className="subtle full" disabled={activeChart === 'Standard'} onClick={addSize}>＋ Add size preset</button><p className="helper">Official size chart loaded automatically. {sizeLabel(currentSize)} uses {dimensions.width} × {dimensions.height} inches. The standard chart includes 6 months = 12 × 18 inches.</p><div className="divider" /><h3>Positioning</h3><label className="check"><input type="checkbox" checked={grouped} onChange={e => setGrouped(e.target.checked)} />Move name & number together</label><label className="field">Selected element<select value={activeControl} onChange={e => setActiveControl(e.target.value)}><option value="name">Name</option><option value="number">Back number</option><option value="frontNumber">Front number</option>{sponsorOptions.map(item => <option key={item.id} value={`sponsor:${item.id}`}>{item.label}</option>)}</select></label>{positionBar('Name horizontal', settings.nameX, v => set('nameX', v))}{positionBar('Name vertical', settings.nameY, v => set('nameY', v))}{positionBar('Number horizontal', settings.numberX, v => set('numberX', v))}{positionBar('Number vertical', settings.numberY, v => set('numberY', v))}{positionBar('Front no. horizontal', settings.frontNumberX, v => set('frontNumberX', v))}{positionBar('Front no. vertical', settings.frontNumberY, v => set('frontNumberY', v))}{activeSponsor && <><div className="divider" /><h3>Selected sponsor position</h3>{positionBar('Sponsor horizontal', activeSponsor.x ?? 50, v => updateSponsor(activeSponsor.id, { x: v }))}{positionBar('Sponsor vertical', activeSponsor.y ?? 12, v => updateSponsor(activeSponsor.id, { y: v }))}</>}<div className="nudge"><button onClick={() => adjustPosition('x', -1)}>←</button><button onClick={() => adjustPosition('y', -1)}>↑</button><button onClick={() => adjustPosition('y', 1)}>↓</button><button onClick={() => adjustPosition('x', 1)}>→</button></div><button className="subtle full" onClick={resetPosition}>Reset positions</button><p className="helper">Drag the text directly on the canvas, or use sliders and arrows. Sponsor lines are individually movable.</p></div> : <div className="property-content"><h3>Alignment &amp; mark presets</h3>
+              <label className="check"><input type="checkbox" checked={settings.smartGuidesEnabled !== false} onChange={e => set('smartGuidesEnabled',e.target.checked)}/>Smart alignment / snap guides</label>
+              <ColorField label="Guide line color" value={settings.smartGuideColor||'#00f0ff'} onChange={v => set('smartGuideColor',v)} />
+              <label className="field">Marking preset<select value={settings.markPreset || 'standard'} onChange={e=>set('markPreset',e.target.value)}><option value="standard">Standard (top 0.1 × 0.3, bottom 0.5 × 0.5)</option><option value="dual-edge">Dual-edge registration (front &amp; back)</option></select></label>
+              {settings.markPreset === 'dual-edge' && <>
+                <p className="helper">Same small top-center rectangle at top and bottom on Front and Back. Does not alter the size chart.</p>
+                <label className="check"><input type="checkbox" checked={settings.markLabelEnabled!==false} onChange={e=>set('markLabelEnabled',e.target.checked)}/>Print size–quantity identifier</label>
+                <label className="field">Identifier position<select value={settings.markLabelPosition||'bottom-left'} onChange={e=>set('markLabelPosition',e.target.value)}>{[['top-left','Top left'],['top-center','Top center'],['top-right','Top right'],['middle-left','Middle left'],['center','Center'],['middle-right','Middle right'],['bottom-left','Bottom left'],['bottom-center','Bottom center'],['bottom-right','Bottom right']].map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label>
+                <ColorField label="Identifier text color" value={settings.markLabelColor||'#ffffff'} onChange={v=>set('markLabelColor',v)}/>
+                <ColorField label="Identifier outline color" value={settings.markLabelBackground||'#000000'} onChange={v=>set('markLabelBackground',v)}/>
+              </>}
+              <div className="divider"/><h3>Registration marks</h3><label className="check"><input type="checkbox" checked={settings.bottomMarkEnabled} onChange={e => set('bottomMarkEnabled', e.target.checked)} />Bottom centered size square (touching edge)</label><div className="two-cols"><Field label="Bottom width (in)" value={settings.bottomMarkWidth} step={.05} onChange={v => set('bottomMarkWidth', v)} /><Field label="Bottom height (in)" value={settings.bottomMarkHeight} step={.05} onChange={v => set('bottomMarkHeight', v)} /></div><ColorField label="Bottom box color" value={settings.bottomMarkFill} onChange={v => set('bottomMarkFill', v)} /><ColorField label="Size text color" value={settings.bottomMarkTextFill} onChange={v => set('bottomMarkTextFill', v)} /><label className="check"><input type="checkbox" checked={settings.topMarkEnabled} onChange={e => set('topMarkEnabled', e.target.checked)} />Top centered rectangle (touching edge)</label><div className="two-cols"><Field label="Top width (in)" value={settings.topMarkWidth} step={.05} onChange={v => set('topMarkWidth', v)} /><Field label="Top height (in)" value={settings.topMarkHeight} step={.05} onChange={v => set('topMarkHeight', v)} /></div><ColorField label="Top mark color" value={settings.topMarkFill} onChange={v => set('topMarkFill', v)} /><div className="divider"/><h3>Back print identifier — Full Sleeve orders only</h3><label className="check"><input type="checkbox" checked={settings.sleeveMarkEnabled} onChange={e => set('sleeveMarkEnabled', e.target.checked)} />Mark the BACK print when player sleeve type is Full</label><label className="field">Identifier text (default: FULL SLEEVE)<input type="text" value={settings.sleeveMarkText} onChange={e => set('sleeveMarkText', e.target.value)} /></label><label className="field">Position<select value={settings.sleeveMarkPosition} onChange={e => set('sleeveMarkPosition', e.target.value)}><option value="bottom-left">Bottom left (edge)</option><option value="bottom-center">Bottom center</option><option value="bottom-right">Bottom right</option><option value="top-left">Top left</option><option value="top-right">Top right</option></select></label><Field label="Identifier square (in at M)" step={.05} value={settings.sleeveMarkHeight} onChange={v => set('sleeveMarkHeight', v)} /><ColorField label="Back identifier color" value={settings.sleeveMarkFill} onChange={v => set('sleeveMarkFill', v)} /><div className="divider" /><h3>Front number</h3><label className="check"><input type="checkbox" checked={settings.frontNumber} onChange={e => set('frontNumber', e.target.checked)} />Enable front number</label><div className="two-cols"><Field label="Front width (in)" value={settings.frontNumberWidth} step={.25} onChange={v => set('frontNumberWidth', v)} /><Field label="Front font size (pt)" value={settings.frontNumberPoints} step={1} onChange={v => set('frontNumberPoints', v)} /></div><p className="helper">Front number is now movable on the front preview only. It no longer appears on sleeves or collar.</p><div className="divider" /><h3>Sleeve size chart</h3>
 <label className="field">Active sleeve chart<select value={activeSleeveProfile} onChange={e=>setActiveSleeveProfile(e.target.value)}>{Object.keys(sleeveProfiles).map(name=><option key={name} value={name}>{name}</option>)}</select></label>
 <div className="profile-actions"><button className="subtle" onClick={createSleeveProfile}>＋ Add chart</button>{activeSleeveProfile!=='Standard'&&<button className="subtle danger" onClick={deleteSleeveProfile}>Delete chart</button>}</div>
 <p className="helper">Standard follows your reference and cannot be edited. A custom chart starts as a copy and can be changed. The half-sleeve size 20 measurement was not supplied, so Standard provisionally uses the 22–28 dimensions.</p>
@@ -786,6 +1060,19 @@ function App() {
               <p>Front without numbers: SIZE-QUANTITY.png. Front with numbers: NUMBER-QUANTITY.png. Back files remain in BACK NAME/. Blank name and blank number are both allowed now. Verify physical sizes before printing.</p>
             </div>
           </aside>
+          <nav className="design-tool-rail" aria-label="Design tools">
+            {[
+              ['text','T','Text'],
+              ['fonts','Aa','Fonts'],
+              ['effects','✧','Effects'],
+              ['layers','▤','Layers'],
+              ['layout','▦','Layout'],
+              ['parts','◈','Parts'],
+              ['export','↗','Export'],
+            ].map(([id,mark,label]) => <button key={id} type="button" className={`design-rail-button ${rightToolsOpen && rightTool === id ? 'active' : ''}`} aria-label={`Open ${label}`} aria-expanded={id === 'export' ? undefined : rightToolsOpen && rightTool === id} title={label} onClick={() => openRightTool(id)}><span>{mark}</span><small>{label}</small></button>)}
+            <button type="button" className="design-rail-close" onClick={()=>setRightToolsOpen(false)} title="Close editing panel" aria-label="Close editing panel">×</button>
+          </nav>
+          </div>
         </div></>}
     </section>
   </div>;
