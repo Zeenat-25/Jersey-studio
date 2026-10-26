@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { canonicalSize, getSleeveDimensions } from './sizeChart';
+import { canonicalSize, getSleeveDimensions, sizeLabel } from './sizeChart';
 import { containScale } from './sizingMath';
 
 const safe = value => String(value ?? '').trim().replace(/[^\p{L}\p{N}_-]+/gu, '_').replace(/^_+|_+$/g, '').slice(0, 90) || 'UNKNOWN';
@@ -312,6 +312,51 @@ function drawTextInches(ctx, value, settings, width, height, dpi, kind, position
   });
 }
 
+function drawTwinLabel(ctx, job, widthPx, heightPx, settings) {
+  if (settings.markLabelEnabled === false) return;
+  const position = settings.markLabelPosition || 'bottom-left';
+  const [vertical,horizontal] = position === 'center' ? ['middle','center'] : position.split('-');
+  const x = horizontal === 'left' ? 8 : horizontal === 'right' ? widthPx-8 : widthPx/2;
+  const y = vertical === 'top' ? Math.max(16,heightPx*.02) : vertical === 'bottom' ? heightPx-Math.max(16,heightPx*.02) : heightPx/2;
+  const label = `${sizeLabel(job.size).replace(/ \(.*\)$/,'')}-${job.quantity}`;
+  ctx.save();ctx.textAlign=horizontal==='left'?'left':horizontal==='right'?'right':'center';
+  ctx.textBaseline='middle'; ctx.font=`900 ${Math.max(13,Math.round(widthPx*.022))}px Arial`;
+  ctx.lineJoin='round';ctx.lineWidth=Math.max(2,widthPx*.002);
+  ctx.strokeStyle=settings.markLabelBackground||'#000000';ctx.strokeText(label,x,y);
+  ctx.fillStyle=settings.markLabelColor||'#ffffff';ctx.fillText(label,x,y);ctx.restore();
+}
+
+function drawStandardEdgeMarks(ctx, widthPx, heightPx, dpi, settings, pageWidthIn, pageHeightIn, isFront, size) {
+  ctx.save();
+  if (settings.topMarkEnabled !== false) {
+    const w = Math.max(1, Number(settings.topMarkWidth ?? .1) * (pageWidthIn / 21) * dpi);
+    const h = Math.max(1, Number(settings.topMarkHeight ?? .3) * (pageHeightIn / 29) * dpi);
+    ctx.fillStyle = settings.topMarkFill || '#ff0000';
+    ctx.fillRect((widthPx - w) / 2, 0, w, h);
+  }
+  if (settings.bottomMarkEnabled !== false) {
+    const w = Math.max(1, Number(settings.bottomMarkWidth ?? .5) * (pageWidthIn / 21) * dpi);
+    const h = Math.max(1, Number(settings.bottomMarkHeight ?? .5) * (pageHeightIn / 29) * dpi);
+    const x = (widthPx - w) / 2, y = heightPx - h;
+    ctx.fillStyle = settings.bottomMarkFill || '#000000';
+    ctx.fillRect(x, y, w, h);
+    drawFittedText(ctx, String(size), {
+      x: widthPx / 2, y: y + h/2, maxWidth: w*.8, maxHeight: h*.68,
+      family: 'Arial', fill: settings.bottomMarkTextFill || '#ffffff', outline:'none', outlineWidth:0,
+      fontSize: h*.6,
+    });
+  }
+  ctx.restore();
+}
+
+function drawDualEdgeMarks(ctx, widthPx, heightPx, dpi, settings, pageWidthIn, pageHeightIn) {
+  if(settings.topMarkEnabled === false) return;
+  const w=Math.max(1,Number(settings.topMarkWidth ?? .1)*(pageWidthIn/21)*dpi);
+  const h=Math.max(1,Number(settings.topMarkHeight ?? .3)*(pageHeightIn/29)*dpi);
+  ctx.save();ctx.fillStyle=settings.topMarkFill||'#ff0000';
+  ctx.fillRect((widthPx-w)/2,0,w,h);ctx.fillRect((widthPx-w)/2,heightPx-h,w,h);ctx.restore();
+}
+
 function drawMarks(ctx, size, widthPx, heightPx, dpi, settings, pageWidthIn, pageHeightIn) {
   ctx.save();
   if (settings.topMarkEnabled !== false) {
@@ -339,11 +384,13 @@ function drawBackSleeveIdentifier(ctx, widthPx, heightPx, dpi, settings) {
   if (settings.sleeveMarkEnabled === false) return;
   const location = settings.sleeveMarkPosition || 'bottom-left';
   const text = String(settings.sleeveMarkText || 'FULL SLEEVE').trim();
-  const height = Math.max(1, Number(settings.sleeveMarkHeight ?? 0.2) * dpi);
-  const width = Math.min(widthPx * 0.38, Math.max(dpi * 1.6, widthPx * 0.18));
-  const x = location.endsWith('left') ? width / 2 : location.endsWith('right') ? widthPx - width / 2 : widthPx / 2;
-  const y = location.startsWith('top') ? height / 2 : heightPx - height / 2;
-  drawFittedText(ctx, text, { x, y, maxWidth: width, maxHeight: height, family:'Arial', fill:settings.sleeveMarkFill || '#000000', outline:'none', outlineWidth:0 });
+  const marker = Math.max(0.1, Number(settings.sleeveMarkHeight ?? .5));
+  const width = Math.max(1, marker * (widthPx / (21 * dpi)) * dpi);
+  const height = Math.max(1, marker * (heightPx / (29 * dpi)) * dpi);
+  const inset = Math.max(2, dpi * .045);
+  const x = location.endsWith('left') ? inset + width/2 : location.endsWith('right') ? widthPx-inset-width/2 : widthPx/2;
+  const y = location.startsWith('top') ? inset + height/2 : heightPx-inset-height/2;
+  drawFittedText(ctx, text, { x, y, maxWidth: width*.94, maxHeight: height*.65, fontSize: height*.54, family:'Arial', fill:settings.sleeveMarkFill || '#000000', outline:'#ffffff', outlineWidth:Math.max(.6,dpi*.008) });
 }
 
 function withDpiMetadata(pngBytes, dpi) {
@@ -407,7 +454,10 @@ async function rasterize(job, settings, dpi, cache) {
     }
     if (job.name) await drawTextInches(ctx, job.name, settings, width, height, dpi, 'name');
     if (String(job.number || '').trim()) await drawTextInches(ctx, job.number, settings, width, height, dpi, 'number');
-    drawMarks(ctx, job.size, widthPx, heightPx, dpi, settings, width, height);
+    if (settings.markPreset === 'dual-edge') {
+      drawDualEdgeMarks(ctx,widthPx,heightPx,dpi,settings,width,height);
+      drawTwinLabel(ctx,job,widthPx,heightPx,settings);
+    } else drawStandardEdgeMarks(ctx, widthPx, heightPx, dpi, settings, width, height, false, job.size);
     if (job.sleeve === 'Full') drawBackSleeveIdentifier(ctx, widthPx, heightPx, dpi, settings);
   }
 
@@ -426,7 +476,10 @@ async function rasterize(job, settings, dpi, cache) {
     if (settings.frontNumber && String(job.number || '').trim()) {
       await drawTextInches(ctx, job.number, settings, width, height, dpi, 'frontNumber');
     }
-    drawMarks(ctx, job.size, widthPx, heightPx, dpi, settings, width, height);
+    if (settings.markPreset === 'dual-edge') {
+      drawDualEdgeMarks(ctx,widthPx,heightPx,dpi,settings,width,height);
+      drawTwinLabel(ctx,job,widthPx,heightPx,settings);
+    } else drawStandardEdgeMarks(ctx, widthPx, heightPx, dpi, settings, width, height, true, job.size);
   }
 
   const outputCanvas = job.part === 'backPaper' ? trimTransparentBounds(canvas, 0) : canvas;
