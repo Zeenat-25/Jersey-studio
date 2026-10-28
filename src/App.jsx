@@ -419,6 +419,9 @@ function App() {
       const face = new FontFace(family, `url("${url}")`);
       await face.load();
       document.fonts.add(face);
+      // Reuse the exact uploaded font bytes when exporting an isolated SVG image.
+      window.__jerseyStudioFontFiles ||= new Map();
+      window.__jerseyStudioFontFiles.set(family.toLowerCase(), file);
       fontFiles.current.push(url);
       setFonts(a => [...new Set([...a, family])]);
       setSettings(s => ({

@@ -172,8 +172,75 @@ function loadImage(dataUrl) {
 // the print canvas at the precise inch-based anchor.
 const svgEsc = v => String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&apos;');
 
+// Export thumbnails and final files must draw the SAME SVG glyph outlines as
+// the editor, not a Canvas replacement face. Isolated SVG images cannot rely
+// on the page's installed/uploaded @font-face rules, so embed the chosen face.
+const embeddedFontCache = new Map();
+const familyKey = family => String(family || '').replace(/^['"]|['"]$/g, '').trim().toLowerCase();
+function fontMime(blob) {
+  if (/woff2/i.test(blob.type) || /\.woff2$/i.test(blob.name || '')) return 'font/woff2';
+  if (/woff/i.test(blob.type) || /\.woff$/i.test(blob.name || '')) return 'font/woff';
+  if (/otf/i.test(blob.type) || /\.otf$/i.test(blob.name || '')) return 'font/otf';
+  return 'font/ttf';
+}
+async function blobDataUrl(blob) {
+  return await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error || new Error('Font file could not be read.'));
+    r.readAsDataURL(blob);
+  });
+}
+async function prepareProductionFonts(settings) {
+  const families = [settings.nameFont, settings.numberFont];
+  if (settings.sponsorEnabled) for (const line of settings.sponsors || []) {
+    if (line.enabled !== false) families.push(line.font || settings.nameFont);
+  }
+  const wanted = [...new Set(families.filter(Boolean).map(familyKey))];
+  const uploaded = window.__jerseyStudioFontFiles;
+  const stillMissing = wanted.filter(key => !embeddedFontCache.has(key) && !uploaded?.has(key));
+  let localFonts = [];
+  if (stillMissing.length && typeof window.queryLocalFonts === 'function') {
+    try { localFonts = await window.queryLocalFonts(); } catch { /* Browser permission can be denied. */ }
+  }
+  for (const key of wanted) {
+    if (embeddedFontCache.has(key)) continue;
+    let file = uploaded?.get(key);
+    if (!file) {
+      const candidates = localFonts.filter(font => familyKey(font.family) === key);
+      // Prefer a Regular/Medium face. This matches the document-selected face
+      // without accidentally substituting a Bold or Black family member.
+      const match = candidates.find(font => /regular|medium|normal/i.test(font.style || font.fullName || '')) || candidates[0];
+      if (match?.blob) {
+        try { file = await match.blob(); } catch { /* Use normal renderer below. */ }
+      }
+    }
+    if (!file) continue;
+    try {
+      const dataUrl = await blobDataUrl(file);
+      embeddedFontCache.set(key, { dataUrl, mime: fontMime(file) });
+    } catch { /* Keep application functional if a font is unreadable. */ }
+  }
+  await Promise.allSettled(families.filter(Boolean).map(family =>
+    document.fonts.load(`900 100px "${String(family).replace(/["\\]/g, '')}"`)
+  ));
+  await document.fonts.ready;
+}
+function embeddedFaceCss(family) {
+  const embedded = embeddedFontCache.get(familyKey(family));
+  if (!embedded) return '';
+  // The SVG gets a private face name to guarantee that the embedded bytes are
+  // selected, not a fallback whose metrics happen to differ from the preview.
+  return `@font-face{font-family:'JSExactExportFace';src:url('${embedded.dataUrl}') format('${embedded.mime.includes('woff2') ? 'woff2' : embedded.mime.includes('woff') ? 'woff' : embedded.mime.includes('otf') ? 'opentype' : 'truetype'}');font-style:normal;font-weight:100 900;}`;
+}
+function exportFontWeight() {
+  // The original preview's FixedText uses 900 consistently. Do not silently
+  // switch only the export path to 400 for an uploaded Medium face.
+  return 900;
+}
+
 async function drawSvgCurveText(ctx, text, options) {
-  const {x,y,maxWidth,fontSize,family,fill,outline,outlineWidth,curve,gradient,shadow} = options;
+  const {x,y,maxWidth,fontSize,family,fill,outline,outlineWidth,curve,gradient,shadow,weight=900} = options;
   const svgNS = 'http://www.w3.org/2000/svg';
   const measureSvg = document.createElementNS(svgNS,'svg');
   measureSvg.setAttribute('width','1');
@@ -182,7 +249,7 @@ async function drawSvgCurveText(ctx, text, options) {
   const sample = document.createElementNS(svgNS,'text');
   sample.setAttribute('x','0');sample.setAttribute('y','0');
   sample.setAttribute('font-size',String(fontSize));
-  sample.setAttribute('font-weight','900');
+  sample.setAttribute('font-weight',String(weight));
   sample.setAttribute('font-family',String(family||'Arial'));
   sample.textContent=text;
   measureSvg.appendChild(sample);
@@ -206,20 +273,58 @@ async function drawSvgCurveText(ctx, text, options) {
   const imgW=Math.ceil(b.width+pad*2);
   const imgH=Math.ceil(b.height+pad*2+Math.abs(lift)*1.2);
   const gradientId='fill';
+  const useOutline = Number(outlineWidth) > 0 && Boolean(outline) && outline !== 'none' && outline !== 'transparent';
   const fillStyle=gradient?.enabled?`url(#${gradientId})`:svgEsc(fill||'#ffffff');
   const direction=gradient?.direction==='vertical' ? ['0%','0%','0%','100%'] : ['0%','0%','100%','0%'];
   const defs=`<path id="arc" d="${path}" fill="none"/>`+
     (gradient?.enabled?`<linearGradient id="${gradientId}" x1="${direction[0]}" y1="${direction[1]}" x2="${direction[2]}" y2="${direction[3]}"><stop offset="0%" stop-color="${svgEsc(gradient.start||fill||'#ffffff')}"/><stop offset="100%" stop-color="${svgEsc(gradient.end||fill||'#ffffff')}"/></linearGradient>`:'')+
     (shadow?.enabled?`<filter id="shadow" x="-80%" y="-80%" width="260%" height="260%"><feDropShadow dx="${Number(shadow.offsetX)||0}" dy="${Number(shadow.offsetY)||0}" stdDeviation="${Number(shadow.blur)||0}" flood-color="${svgEsc(shadow.color||'#000000')}"/></filter>`:'');
-  const svg=`<svg xmlns="${svgNS}" xmlns:xlink="http://www.w3.org/1999/xlink" width="${imgW}" height="${imgH}" viewBox="${-imgW/2} ${-imgH/2} ${imgW} ${imgH}"><defs>${defs}</defs>`+
+  const exactFace = Boolean(embeddedFontCache.get(familyKey(family)));
+  const css = exactFace ? `<style>${embeddedFaceCss(family)}</style>` : '';
+  const drawnFamily = exactFace ? 'JSExactExportFace' : svgEsc(family || 'Arial');
+  const svg=`<svg xmlns="${svgNS}" xmlns:xlink="http://www.w3.org/1999/xlink" width="${imgW}" height="${imgH}" viewBox="${-imgW/2} ${-imgH/2} ${imgW} ${imgH}"><defs>${css}${defs}</defs>`+
     `<g transform="translate(${-cx} ${-cy})"${shadow?.enabled?' filter="url(#shadow)"':''}>`+
-    `<text font-size="${fontSize}" font-weight="900" font-family="${svgEsc(family||'Arial')}" fill="${fillStyle}" stroke="${svgEsc(outline||'none')}" stroke-width="${Number(outlineWidth)||0}" paint-order="stroke" stroke-linejoin="round">`+
-    `<textPath href="#arc" xlink:href="#arc" startOffset="50%" text-anchor="middle">${svgEsc(text)}</textPath></text></g></svg>`;
+    `<text font-size="${fontSize}" font-weight="${weight}" font-family="${drawnFamily}" fill="${fillStyle}" stroke="${useOutline ? svgEsc(outline) : 'none'}" stroke-width="${useOutline ? Number(outlineWidth) : 0}" paint-order="stroke" stroke-linejoin="round">`+
+    (Math.abs(Number(curve) || 0) > .25
+      ? `<textPath href="#arc" xlink:href="#arc" startOffset="50%" text-anchor="middle">${svgEsc(text)}</textPath>`
+      : `<tspan x="${cx}" y="0" text-anchor="middle">${svgEsc(text)}</tspan>`) +
+    `</text></g></svg>`;
   const url=URL.createObjectURL(new Blob([svg],{type:'image/svg+xml;charset=utf-8'}));
   try {
     const img=await loadImage(url);
     ctx.drawImage(img,x-imgW*scale/2,y-imgH*scale/2,imgW*scale,imgH*scale);
   } finally { URL.revokeObjectURL(url); }
+}
+
+// Measure exactly as the live FixedText SVG preview does. Canvas measureText
+// reports different ink bounds for some installed/custom font faces.
+function measureLikePreview(text, fontSize, family, weight=900) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('width', '1');
+  svg.setAttribute('height', '1');
+  svg.style.cssText = 'position:fixed;left:-20000px;top:-20000px;overflow:visible;opacity:0;pointer-events:none';
+  const label = document.createElementNS(ns, 'text');
+  label.setAttribute('x', '0');
+  label.setAttribute('y', '0');
+  label.setAttribute('font-size', String(fontSize));
+  label.setAttribute('font-weight', String(weight));
+  label.setAttribute('font-family', family || 'Arial');
+  label.textContent = text;
+  svg.appendChild(label);
+  document.body.appendChild(svg);
+  try {
+    const bounds = label.getBBox();
+    if (bounds.width > 0 && bounds.height > 0) return bounds;
+  } catch { /* Fall back to Canvas below when SVG measurement unavailable. */ }
+  finally { svg.remove(); }
+  return null;
+}
+
+// Fonts must be ready for review thumbnails as well as final PNG/JPG/TIFF/PDF.
+// The previous exporter waited for only name and number during final ZIP export.
+async function ensureProductionFonts(settings) {
+  await prepareProductionFonts(settings);
 }
 
 function drawFittedText(ctx, textValue, options) {
@@ -228,15 +333,17 @@ function drawFittedText(ctx, textValue, options) {
   if (!text) return;
 
   ctx.save();
-  ctx.font = `900 ${fontSize}px "${String(family || 'Arial').replace(/["\\]/g,'')}"`;
+  const weight = exportFontWeight(family);
+  ctx.font = `${weight} ${fontSize}px "${String(family || 'Arial').replace(/["\\]/g,'')}"`;
   ctx.textBaseline = 'alphabetic';
-  const m = ctx.measureText(text);
-  const left = Number.isFinite(m.actualBoundingBoxLeft) ? m.actualBoundingBoxLeft : 0;
-  const right = Number.isFinite(m.actualBoundingBoxRight) ? m.actualBoundingBoxRight : m.width;
-  const ascent = m.actualBoundingBoxAscent || fontSize*0.75;
-  const descent = m.actualBoundingBoxDescent || fontSize*0.25;
-  const sourceW = Math.max(1, left + right);
-  const sourceH = Math.max(1, ascent + descent);
+  const previewBounds = measureLikePreview(text, fontSize, family, weight);
+  const m = previewBounds ? null : ctx.measureText(text);
+  const left = previewBounds ? -previewBounds.x : (Number.isFinite(m.actualBoundingBoxLeft) ? m.actualBoundingBoxLeft : 0);
+  const right = previewBounds ? previewBounds.x + previewBounds.width : (Number.isFinite(m.actualBoundingBoxRight) ? m.actualBoundingBoxRight : m.width);
+  const ascent = previewBounds ? -previewBounds.y : (m.actualBoundingBoxAscent || fontSize * .75);
+  const descent = previewBounds ? previewBounds.y + previewBounds.height : (m.actualBoundingBoxDescent || fontSize * .25);
+  const sourceW = Math.max(1, previewBounds ? previewBounds.width : left + right);
+  const sourceH = Math.max(1, previewBounds ? previewBounds.height : ascent + descent);
 
   const targetW = Math.max(1, maxWidth);
   const targetH = maxHeight ? Math.max(1, maxHeight) : Math.max(1, sourceH * (targetW / sourceW));
@@ -254,7 +361,8 @@ function drawFittedText(ctx, textValue, options) {
 
   ctx.lineJoin = 'round';
   ctx.miterLimit = 2;
-  ctx.strokeStyle = outline || 'transparent';
+  const useOutline = Number(outlineWidth) > 0 && Boolean(outline) && outline !== 'none' && outline !== 'transparent';
+  ctx.strokeStyle = useOutline ? outline : 'transparent';
   if(gradient?.enabled){
     const g=gradient.direction==='vertical' ? ctx.createLinearGradient(0,-sourceH/2,0,sourceH/2) : ctx.createLinearGradient(-sourceW/2,0,sourceW/2,0);
     g.addColorStop(0,gradient.start||fill||'#ffffff');g.addColorStop(1,gradient.end||fill||'#ffffff');
@@ -270,10 +378,19 @@ function drawFittedText(ctx, textValue, options) {
     ctx.restore();
     return drawSvgCurveText(ctx, text, {
       x, y, maxWidth:targetW, fontSize, family, fill, outline,
-      outlineWidth, curve, gradient, shadow,
+      outlineWidth, curve, gradient, shadow, weight,
     });
   }
-  if (ctx.lineWidth > 0 && outline !== 'none') ctx.strokeText(text, drawX, drawY);
+  if (embeddedFontCache.has(familyKey(family)) && !maxHeight) {
+    // SVG image with inline font data uses the same SVG glyph layout as the live
+    // editor. Do not draw a second Canvas text pass on top of it.
+    ctx.restore();
+    return drawSvgCurveText(ctx, text, {
+      x, y, maxWidth: targetW, fontSize, family, fill, outline,
+      outlineWidth, curve: 0, gradient, shadow, weight,
+    });
+  }
+  if (useOutline) ctx.strokeText(text, drawX, drawY);
   ctx.fillText(text, drawX, drawY);
   ctx.restore();
 }
@@ -533,8 +650,46 @@ function trimTransparentBounds(canvas, padPx = 0) {
 
 
 export async function renderReviewThumbnail(job,settings,dpi=20){
+  await ensureProductionFonts(settings);
   const result=await rasterize(job,settings,dpi,new Map());
   return URL.createObjectURL(result.blob);
+}
+
+// JPEG encoders generally default to 72/96 DPI regardless of pixel dimensions.
+// Preserve the user's selected print resolution in a standard JFIF APP0 segment.
+// This only updates metadata and does not resample or alter the artwork pixels.
+async function withJpegDpiMetadata(jpegBlob, dpi) {
+  const bytes = new Uint8Array(await jpegBlob.arrayBuffer());
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+    throw new Error('Invalid JPEG encoding.');
+  }
+  const density = Math.max(1, Math.min(65535, Math.round(Number(dpi) || 300)));
+  const jfif = new Uint8Array([
+    0xff, 0xe0, 0x00, 0x10, // APP0, 16 bytes including length
+    0x4a, 0x46, 0x49, 0x46, 0x00, // JFIF identifier
+    0x01, 0x02, // version 1.02
+    0x01, // density units: dots per inch
+    density >> 8, density & 255, // X density
+    density >> 8, density & 255, // Y density
+    0x00, 0x00 // no thumbnail
+  ]);
+  // Replace the current JFIF segment in place if the encoder supplied one.
+  if (bytes.length >= 20 && bytes[2] === 0xff && bytes[3] === 0xe0 &&
+      bytes[6] === 0x4a && bytes[7] === 0x46 && bytes[8] === 0x49 &&
+      bytes[9] === 0x46 && bytes[10] === 0x00) {
+    const updated = bytes.slice();
+    updated[13] = 1;
+    updated[14] = density >> 8;
+    updated[15] = density & 255;
+    updated[16] = density >> 8;
+    updated[17] = density & 255;
+    return new Blob([updated], {type:'image/jpeg'});
+  }
+  const updated = new Uint8Array(bytes.length + jfif.length);
+  updated.set(bytes.subarray(0,2),0);
+  updated.set(jfif,2);
+  updated.set(bytes.subarray(2),2+jfif.length);
+  return new Blob([updated], {type:'image/jpeg'});
 }
 
 async function convertPngBlob(pngBlob,format,dims,dpi){
@@ -547,7 +702,10 @@ async function convertPngBlob(pngBlob,format,dims,dpi){
     if(!ctx)throw new Error('Could not create export canvas.');
     if(format==='JPG'){ctx.fillStyle='#ffffff';ctx.fillRect(0,0,canvas.width,canvas.height);}
     ctx.drawImage(img,0,0);
-    if(format==='JPG')return await new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(new Error('JPEG encode failed.')),'image/jpeg',0.95));
+    if(format==='JPG'){
+      const jpeg = await new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(new Error('JPEG encode failed.')),'image/jpeg',0.95));
+      return withJpegDpiMetadata(jpeg,dpi);
+    }
     if(format==='TIFF'){
       const UTIF=await import('utif');
       const rgba=ctx.getImageData(0,0,canvas.width,canvas.height).data;
@@ -570,12 +728,7 @@ export async function exportProductionZip({players, settings, artwork, dpi=300, 
   if (![150,300].includes(Number(dpi))) throw new Error('Choose 150 or 300 DPI.');
   if(!['PNG','JPG','TIFF','PDF'].includes(format))throw new Error('Select PNG, JPG, TIFF or PDF.');
   const jobs = createProductionJobs(players, settings, artwork);
-  try {
-    await Promise.all([
-      document.fonts.load(`900 100px "${settings.nameFont}"`),
-      document.fonts.load(`900 100px "${settings.numberFont}"`),
-    ]);
-  } catch {}
+  await ensureProductionFonts(settings);
   const zip = new JSZip();
   const cache = new Map();
   for (let i = 0; i < jobs.length; i++) {
